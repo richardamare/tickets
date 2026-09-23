@@ -3,13 +3,18 @@
   "module": "src/main.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "dev": "bun --watch src/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "effect": "^4.0.0-rc.117"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^7"
-  },
-  "dependencies": {
-    "effect": "^4.0.0-rc.117"
   }
 }
