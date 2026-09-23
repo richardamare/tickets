@@ -24,8 +24,13 @@ export class Browser extends Context.Service<
     Layer.effect(
       Browser,
       Effect.gen(function* () {
-        const browser = yield* Effect.acquireRelease(attempt("launch", () => chromium.launch(options)), (browser) =>
-          attempt("close", () => browser.close()).pipe(Effect.ignore({ log: "Warn" })),
+        const browser = yield* Effect.acquireRelease(
+          attempt("launch", () =>
+            // Playwright's own signal handlers kill the browser without interrupting the program, which
+            // then runs on against a dead browser and exits 0; the Effect runtime owns signals instead.
+            chromium.launch({ handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false, ...options }),
+          ),
+          (browser) => attempt("close", () => browser.close()).pipe(Effect.ignore({ log: "Warn" })),
         )
 
         const newPage = Effect.acquireRelease(attempt("open page", () => browser.newContext()), (context) =>

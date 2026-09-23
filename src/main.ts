@@ -18,6 +18,13 @@ const scraper = Command.make("ticket-scraper", { url }, ({ url }) =>
 // bun run sets npm_package_version from package.json; running the file directly does not.
 const version = Config.NonEmptyString("npm_package_version").pipe(Config.withDefault("unknown"))
 
+// runMain interrupts on SIGINT and SIGTERM only; without this, SIGHUP skips the finalizers that close the browser.
+const hangup = Effect.callback<never>((resume) => {
+  const onHangup = () => resume(Effect.interrupt)
+  process.once("SIGHUP", onHangup)
+  return Effect.sync(() => process.off("SIGHUP", onHangup))
+})
+
 Effect.gen(function* () {
   yield* Command.run(scraper, { version: yield* version })
-}).pipe(Effect.provide(BunServices.layer), BunRuntime.runMain)
+}).pipe(Effect.raceFirst(hangup), Effect.provide(BunServices.layer), BunRuntime.runMain)
