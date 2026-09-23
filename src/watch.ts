@@ -96,9 +96,6 @@ const summary = (availability: Availability) =>
 
 export const watch = (urls: ReadonlyArray<string>, options: { readonly everyMinutes: number; readonly once: boolean; readonly maxSteps: number }) =>
   Effect.gen(function* () {
-    if (options.everyMinutes < 5) {
-      return yield* new WatchError({ message: `--every ${options.everyMinutes} is below the 5 minute minimum` })
-    }
     const fs = yield* FileSystem.FileSystem
     const path = yield* Path.Path
     const storeFile = yield* Config.String("WATCH_STATE_FILE").pipe(

@@ -47,7 +47,14 @@ const watchCommand = Command.make(
   "watch",
   {
     urls: Argument.String("url").pipe(Argument.withDescription("Event pages to monitor"), Argument.atLeast(1)),
-    every: Flag.Int("every").pipe(Flag.withDescription("Minutes between rounds of checks (at least 5)"), Flag.withDefault(15)),
+    every: Flag.Int("every").pipe(
+      Flag.withDescription("Minutes between rounds of checks (at least 5)"),
+      Flag.withDefault(15),
+      Flag.filter(
+        (minutes) => minutes >= 5,
+        (minutes) => `--every ${minutes} is below the 5 minute minimum`,
+      ),
+    ),
     once: Flag.Boolean("once").pipe(Flag.withDescription("Run one round of checks and exit"), Flag.withDefault(false)),
     maxSteps: Flag.Int("max-steps").pipe(Flag.withDescription("Model calls per check before giving up"), Flag.withDefault(25)),
   },
