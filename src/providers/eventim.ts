@@ -116,8 +116,7 @@ const read = (url: URL) =>
         ),
       )
       yield* Effect.yieldNow
-      // Popups that cover the page would swallow a real click.
-      yield* seatingChart.first().dispatchEvent("click")
+      yield* seatingChart.first().mouseClick
       const [seatmap, mapping, availability] = yield* Fiber.join(responses)
       return decodeSeatmap(seatmap, mapping, availability)
     }),

@@ -18,6 +18,8 @@ Work in three steps.
 
 3. Answer. Call state_read and write the answer from the state alone, with the URL each item came from.
 
+Every click is a real mouse click: the cursor travels to the element and presses it. When the target is covered, the click is not made and the error names what covers it. A cursor passing over a menu or map region can open a dropdown or tooltip on the way, and marketing popups appear on their own. Clear it before trying again: click an empty spot such as a page heading or the side panel, then click the target once more, reaching it from a different direction if the same thing opens again. After each click, read the part of the page it should change (a selected count, a panel, the URL) and confirm it did what you meant; when it changed something else instead, such as a filter or a tab, set that back before you continue.
+
 When a page asks you to sign in, call list_secrets and enter each credential with fill_secret by name; the values stay hidden from you, so every credential goes through fill_secret.
 `.trim()
 
@@ -150,9 +152,13 @@ export const browserTools: ReadonlyArray<Tool> = [
         return cap(yield* Schema.encodeEffect(Links)(resolved))
       }),
   ),
-  tool("click", "Click the first element matching the selector.", Schema.Struct({ selector: Selector }), ({ selector }) =>
+  tool(
+    "click",
+    "Move the mouse to the first element matching the selector and click it. Fails without clicking when something covers the element, naming what covers it.",
+    Schema.Struct({ selector: Selector }),
+    ({ selector }) =>
     Effect.gen(function* () {
-      yield* Locator.use((locator) => locator.first().click).pipe(Locator.at(selector))
+      yield* Locator.use((locator) => locator.first().mouseClick).pipe(Locator.at(selector))
       yield* Page.use((page) => page.waitForLoad)
       return `Clicked ${selector}; now at ${yield* pageUrl} (title: ${yield* Page.use((page) => page.title)})`
     }),

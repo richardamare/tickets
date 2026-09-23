@@ -28,14 +28,68 @@ export interface LocatorShape {
   readonly nth: (index: number) => LocatorShape
   readonly all: Effect.Effect<ReadonlyArray<LocatorShape>, BrowserError>
   readonly count: Effect.Effect<number, BrowserError>
-  readonly click: Effect.Effect<void, BrowserError>
+  readonly mouseClick: Effect.Effect<void, BrowserError>
   readonly fill: (value: string) => Effect.Effect<void, BrowserError>
   readonly innerText: Effect.Effect<string, BrowserError>
   readonly allInnerTexts: Effect.Effect<ReadonlyArray<string>, BrowserError>
   readonly getAttribute: (name: string) => Effect.Effect<Option.Option<string>, BrowserError>
   readonly isVisible: Effect.Effect<boolean, BrowserError>
   readonly waitFor: Effect.Effect<void, BrowserError>
-  readonly dispatchEvent: (type: string) => Effect.Effect<void, BrowserError>
+}
+
+// Playwright does not expose where its cursor is, so each page's last position is kept here.
+const cursors = new WeakMap<PlaywrightPage, { x: number; y: number }>()
+
+const between = (min: number, max: number) => min + Math.random() * (max - min)
+
+const moveMouse = async (page: PlaywrightPage, to: { x: number; y: number }) => {
+  const from = cursors.get(page) ?? { x: between(0, 50), y: between(0, 50) }
+  const distance = Math.hypot(to.x - from.x, to.y - from.y)
+  // A control point off the straight line bows the path the way a hand does.
+  const bend = between(-0.3, 0.3) * distance
+  const control = {
+    x: (from.x + to.x) / 2 - ((to.y - from.y) / (distance || 1)) * bend,
+    y: (from.y + to.y) / 2 + ((to.x - from.x) / (distance || 1)) * bend,
+  }
+  const steps = Math.max(10, Math.round(distance / 15))
+  for (let step = 1; step <= steps; step++) {
+    const linear = step / steps
+    const t = linear < 0.5 ? 2 * linear ** 2 : 1 - (-2 * linear + 2) ** 2 / 2
+    await page.mouse.move(
+      (1 - t) ** 2 * from.x + 2 * (1 - t) * t * control.x + t ** 2 * to.x,
+      (1 - t) ** 2 * from.y + 2 * (1 - t) * t * control.y + t ** 2 * to.y,
+    )
+    await Bun.sleep(between(5, 15))
+  }
+  cursors.set(page, to)
+}
+
+const mouseClick = async (locator: PlaywrightLocator) => {
+  await locator.scrollIntoViewIfNeeded()
+  const box = await locator.boundingBox()
+  if (!box) throw new Error("the element has no box on screen")
+  const page = locator.page()
+  const point = { x: box.x + box.width * between(0.3, 0.7), y: box.y + box.height * between(0.3, 0.7) }
+  await moveMouse(page, point)
+  await Bun.sleep(between(60, 180))
+  // The cursor's path can open a hover menu or tooltip over the target, and a click there would hit that instead.
+  const cover = await locator.evaluate((element, { x, y }) => {
+    let hit = element.ownerDocument.elementFromPoint(x, y)
+    // A shadow host reports itself as the hit; the element under the point sits inside its shadow root.
+    while (hit?.shadowRoot) {
+      const inner = hit.shadowRoot.elementFromPoint(x, y)
+      if (inner === null || inner === hit) break
+      hit = inner
+    }
+    if (hit === null || element === hit || element.contains(hit)) return undefined
+    const classes = typeof hit.className === "string" ? hit.className.trim().split(/\s+/).slice(0, 3).join(".") : ""
+    const text = (hit.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 60)
+    return `<${hit.tagName.toLowerCase()}${classes ? `.${classes}` : ""}>${text ? ` "${text}"` : ""}`
+  }, point)
+  if (cover !== undefined) throw new Error(`not clicked: the element is covered by ${cover}`)
+  await page.mouse.down()
+  await Bun.sleep(between(40, 110))
+  await page.mouse.up()
 }
 
 const makeLocator = (raw: PlaywrightLocator): LocatorShape => ({
@@ -47,7 +101,7 @@ const makeLocator = (raw: PlaywrightLocator): LocatorShape => ({
   nth: (index) => makeLocator(raw.nth(index)),
   all: attempt(`list ${raw}`, () => raw.all()).pipe(Effect.map((locators) => locators.map(makeLocator))),
   count: attempt(`count ${raw}`, () => raw.count()),
-  click: attempt(`click ${raw}`, () => raw.click()),
+  mouseClick: attempt(`mouse-click ${raw}`, () => mouseClick(raw)),
   fill: (value) => attempt(`fill ${raw}`, () => raw.fill(value)),
   innerText: attempt(`read text of ${raw}`, () => raw.innerText()),
   allInnerTexts: attempt(`read texts of ${raw}`, () => raw.allInnerTexts()),
@@ -55,7 +109,6 @@ const makeLocator = (raw: PlaywrightLocator): LocatorShape => ({
     attempt(`read ${name} of ${raw}`, () => raw.getAttribute(name)).pipe(Effect.map(Option.fromNullOr)),
   isVisible: attempt(`check visibility of ${raw}`, () => raw.isVisible()),
   waitFor: attempt(`wait for ${raw}`, () => raw.waitFor()),
-  dispatchEvent: (type) => attempt(`dispatch ${type} on ${raw}`, () => raw.dispatchEvent(type)),
 })
 
 export interface PageShape {
