@@ -62,6 +62,7 @@ export interface PageShape {
   readonly locator: (selector: string) => LocatorShape
   readonly getByRole: (role: Parameters<PlaywrightPage["getByRole"]>[0], options?: RoleOptions) => LocatorShape
   readonly getByText: (text: string | RegExp, options?: TextOptions) => LocatorShape
+  readonly waitForLoad: Effect.Effect<void, BrowserError>
   readonly screenshot: (path: string) => Effect.Effect<void, BrowserError>
   readonly use: <A>(operation: string, f: (page: PlaywrightPage) => Promise<A>) => Effect.Effect<A, BrowserError>
 }
@@ -75,6 +76,7 @@ const makePage = (raw: PlaywrightPage): PageShape => ({
   locator: (selector) => makeLocator(raw.locator(selector)),
   getByRole: (role, options) => makeLocator(raw.getByRole(role, options)),
   getByText: (text, options) => makeLocator(raw.getByText(text, options)),
+  waitForLoad: attempt("wait for page load", () => raw.waitForLoadState("domcontentloaded")),
   screenshot: (path) => attempt(`screenshot to ${path}`, () => raw.screenshot({ path })),
   use: (operation, f) => attempt(operation, () => f(raw)),
 })

@@ -1,0 +1,301 @@
+import { Console, Data, Effect, Option, Redacted, Schema } from "effect"
+import type { FunctionTool, ResponseFunctionToolCall, ResponseInputItem } from "openai/resources/responses/responses"
+import { BrowserError, Locator, Page } from "./browser.ts"
+import { Foundry } from "./foundry.ts"
+import { type SecretError, Secrets } from "./secrets.ts"
+import { AgentState, type StateError } from "./state.ts"
+
+const MAX_TOOL_OUTPUT = 20_000
+
+const INSTRUCTIONS = `
+You complete the user's task by operating a real web browser through your tools. Everything you report is evidence: text you read on a page during this run.
+
+Work in three steps.
+
+1. Orient. Open the starting page and read it before acting on it. When a cookie or consent banner covers the page, accept it and read again. Build every selector from something you have read: visible text (text=Sign in) or markup the page has shown you.
+
+2. Gather. Visit every page the task needs: listings, detail pages, further pages of results. Record each finding the moment you read it with state_write, one entry per item (an event, a ticket tier, an order) keyed by what identifies it, and extend it with state_update as later pages add fields. Record a field the page omits as "not shown", and a page that fails as "could not load" with its error. This step is done when every item the task asks for has an entry and every requested field in it holds a value, "not shown" or "could not load".
+
+3. Answer. Call state_read and write the answer from the state alone, with the URL each item came from.
+
+When a page asks you to sign in, call list_secrets and enter each credential with fill_secret by name; the values stay hidden from you, so every credential goes through fill_secret.
+`.trim()
+
+export type ToolEvent = {
+  readonly step: number
+  readonly tool: string
+  readonly args: string
+  readonly ok: boolean
+  readonly output: string
+}
+
+export class AgentError extends Data.TaggedError("AgentError")<{
+  readonly reason: "step-limit" | "empty-answer" | "truncated" | "content-filter" | "unexpected-status"
+  readonly detail: string
+  readonly trace: ReadonlyArray<ToolEvent>
+}> {
+  override get message() {
+    return `Agent stopped without an answer (${this.reason}): ${this.detail}`
+  }
+}
+
+type Tool = {
+  readonly definition: FunctionTool
+  readonly run: (rawArgs: string) => Effect.Effect<string, string, Page | AgentState | Secrets>
+}
+
+const tool = <S extends Schema.Top>(
+  name: string,
+  description: string,
+  input: S,
+  run: (
+    args: S["Type"],
+  ) => Effect.Effect<
+    string,
+    BrowserError | StateError | SecretError | Schema.SchemaError,
+    Page | AgentState | Secrets | S["DecodingServices"]
+  >,
+) => ({
+  definition: {
+    type: "function" as const,
+    name,
+    description,
+    strict: false,
+    parameters: Schema.toJsonSchemaDocument(input).schema as Record<string, unknown>,
+  },
+  run: (rawArgs: string) =>
+    Schema.decodeUnknownEffect(Schema.fromJsonString(input))(rawArgs).pipe(
+      Effect.mapError((error) => `Invalid arguments for ${name}: ${error.message}`),
+      Effect.flatMap((args) => run(args).pipe(Effect.mapError((error) => error.message))),
+    ),
+})
+
+// Truncation is stated in the output, so the model knows it saw part of the page rather than all of it.
+const cap = (text: string) =>
+  text.length <= MAX_TOOL_OUTPUT
+    ? text
+    : `${text.slice(0, MAX_TOOL_OUTPUT)}\n[truncated: showing ${MAX_TOOL_OUTPUT} of ${text.length} characters; use a narrower selector]`
+
+const Selector = Schema.String.annotate({ description: "Playwright selector, e.g. 'css=.event-card' or 'text=Buy tickets'" })
+
+const pageUrl = Page.use((page) => page.url)
+
+// A selector that matches nothing says so, because an empty list reads as "the page has none of these".
+const noMatch = (selector: string) =>
+  pageUrl.pipe(
+    Effect.map(
+      (url) =>
+        `No elements match ${selector} on ${url}. This says nothing about the page content; read_text the body to see its actual markup and text.`,
+    ),
+  )
+
+const NoArgs = Schema.Record(Schema.String, Schema.Never)
+const Texts = Schema.fromJsonString(Schema.Array(Schema.String))
+const Links = Schema.fromJsonString(
+  Schema.Array(Schema.Struct({ text: Schema.String, href: Schema.String })),
+)
+
+export const browserTools: ReadonlyArray<Tool> = [
+  tool("navigate", "Open a URL in the browser.", Schema.Struct({ url: Schema.String }), ({ url }) =>
+    Page.use((page) =>
+      Effect.gen(function* () {
+        yield* page.goto(url)
+        return `Loaded ${yield* page.url} (title: ${yield* page.title})`
+      }),
+    ),
+  ),
+  tool("current_url", "Return the URL of the current page.", NoArgs, () => pageUrl),
+  tool(
+    "read_text",
+    "Return the visible text of the first element matching the selector (defaults to the whole page body).",
+    Schema.Struct({ selector: Schema.optionalKey(Selector) }),
+    ({ selector }) => Locator.use((locator) => locator.first().innerText).pipe(Locator.at(selector ?? "body"), Effect.map(cap)),
+  ),
+  tool(
+    "read_all",
+    "Return the visible text of every element matching the selector as a JSON array, e.g. one entry per event row.",
+    Schema.Struct({ selector: Selector }),
+    ({ selector }) =>
+      Locator.use((locator) => locator.allInnerTexts).pipe(
+        Locator.at(selector),
+        Effect.flatMap((texts) =>
+          texts.length === 0 ? noMatch(selector) : Schema.encodeEffect(Texts)(texts).pipe(Effect.map(cap)),
+        ),
+      ),
+  ),
+  tool(
+    "list_links",
+    "Return the text and absolute href of every link inside the selector (defaults to the whole page) as JSON.",
+    Schema.Struct({ selector: Schema.optionalKey(Selector) }),
+    ({ selector }) =>
+      Effect.gen(function* () {
+        const base = yield* pageUrl
+        const linkSelector = `${selector ?? "body"} a[href]`
+        const links = yield* Locator.use((locator) => locator.all).pipe(Locator.at(linkSelector))
+        if (links.length === 0) return yield* noMatch(linkSelector)
+        const rows = yield* Effect.forEach(
+          links,
+          (link) =>
+            Effect.all({ text: link.innerText, href: link.getAttribute("href") }).pipe(
+              Effect.map(({ text, href }) => ({ text: text.trim(), href })),
+            ),
+          { concurrency: 8 },
+        )
+        const resolved = rows.flatMap(({ text, href }) =>
+          Option.match(href, {
+            onNone: () => [],
+            onSome: (raw) => [{ text, href: Option.getOrElse(Option.liftThrowable(() => new URL(raw, base).href)(), () => raw) }],
+          }),
+        )
+        return cap(yield* Schema.encodeEffect(Links)(resolved))
+      }),
+  ),
+  tool("click", "Click the first element matching the selector.", Schema.Struct({ selector: Selector }), ({ selector }) =>
+    Effect.gen(function* () {
+      yield* Locator.use((locator) => locator.first().click).pipe(Locator.at(selector))
+      yield* Page.use((page) => page.waitForLoad)
+      return `Clicked ${selector}; now at ${yield* pageUrl} (title: ${yield* Page.use((page) => page.title)})`
+    }),
+  ),
+  tool(
+    "fill",
+    "Type a value into the first input matching the selector.",
+    Schema.Struct({ selector: Selector, value: Schema.String }),
+    ({ selector, value }) =>
+      Locator.use((locator) => locator.first().fill(value)).pipe(Locator.at(selector), Effect.as(`Filled ${selector}`)),
+  ),
+]
+
+const StateKey = Schema.String.annotate({ description: "Entry name, e.g. 'event:radiohead-2026-11-02'" })
+const StateValue = Schema.fromJsonString(Schema.Json)
+const StateSnapshot = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Json))
+
+export const stateTools: ReadonlyArray<Tool> = [
+  tool(
+    "state_write",
+    "Create a new entry in the shared state. Fails if the key already exists.",
+    Schema.Struct({ key: StateKey, value: Schema.Json }),
+    ({ key, value }) => AgentState.use((state) => state.write(key, value)).pipe(Effect.as(`Wrote ${key}`)),
+  ),
+  tool(
+    "state_update",
+    "Replace the value of an existing entry in the shared state. Fails if the key does not exist.",
+    Schema.Struct({ key: StateKey, value: Schema.Json }),
+    ({ key, value }) => AgentState.use((state) => state.update(key, value)).pipe(Effect.as(`Updated ${key}`)),
+  ),
+  tool(
+    "state_read",
+    "Return one entry of the shared state, or every entry as a JSON object when no key is given.",
+    Schema.Struct({ key: Schema.optionalKey(StateKey) }),
+    ({ key }) =>
+      AgentState.use((state) =>
+        key === undefined
+          ? state.snapshot.pipe(Effect.flatMap(Schema.encodeEffect(StateSnapshot)))
+          : state.read(key).pipe(Effect.flatMap(Schema.encodeEffect(StateValue))),
+      ).pipe(Effect.map(cap)),
+  ),
+]
+
+const SecretList = Schema.fromJsonString(
+  Schema.Array(
+    Schema.Struct({ name: Schema.String, origins: Schema.Union([Schema.Array(Schema.String), Schema.Literal("any")]) }),
+  ),
+)
+
+// The secret value goes from the environment straight into the field; neither the model, the tool output nor the trace sees it.
+export const secretTools: ReadonlyArray<Tool> = [
+  tool(
+    "list_secrets",
+    "Return the names of the secrets you can enter with fill_secret and the origins each one is limited to.",
+    NoArgs,
+    () => Secrets.use((secrets) => Schema.encodeEffect(SecretList)(secrets.list)),
+  ),
+  tool(
+    "fill_secret",
+    "Type a named secret (password, email, card number...) into the first input matching the selector.",
+    Schema.Struct({ selector: Selector, name: Schema.String.annotate({ description: "Secret name from list_secrets" }) }),
+    ({ selector, name }) =>
+      Effect.gen(function* () {
+        const url = yield* pageUrl
+        const origin = Option.getOrElse(Option.liftThrowable(() => new URL(url).origin)(), () => url)
+        const value = yield* Secrets.use((secrets) => secrets.valueFor(name, origin))
+        const secret = Redacted.value(value)
+        // Playwright's error call log quotes the typed text, so only the first line survives, with the value scrubbed.
+        yield* Locator.use((locator) => locator.first().fill(secret)).pipe(
+          Locator.at(selector),
+          Effect.mapError(
+            (error) =>
+              new BrowserError({
+                operation: `fill ${selector} with secret ${name}`,
+                cause: String(error.cause instanceof Error ? error.cause.message : error.cause)
+                  .split("\n")[0]!
+                  .replaceAll(secret, "[secret]"),
+              }),
+          ),
+        )
+        return `Filled ${selector} with secret ${name}`
+      }),
+  ),
+]
+
+const tools = [...browserTools, ...stateTools, ...secretTools]
+
+const instructions = `${INSTRUCTIONS}\n\nYour tools:\n${tools
+  .map(({ definition }) => `- ${definition.name}: ${definition.description}`)
+  .join("\n")}`
+
+const runToolCall = (call: ResponseFunctionToolCall) => {
+  const found = tools.find((t) => t.definition.name === call.name)
+  return found ? found.run(call.arguments) : Effect.fail(`Unknown tool ${call.name}`)
+}
+
+export const runAgent = (task: string, options: { readonly maxSteps: number }) =>
+  Effect.gen(function* () {
+    const foundry = yield* Foundry
+    const trace: Array<ToolEvent> = []
+    const stop = (reason: AgentError["reason"], detail: string) => new AgentError({ reason, detail, trace })
+
+    let input: string | Array<ResponseInputItem> = task
+    let previousResponseId: string | undefined
+
+    for (let step = 1; step <= options.maxSteps; step++) {
+      const response = yield* foundry.respond({
+        instructions,
+        input,
+        tools: tools.map((t) => t.definition),
+        parallel_tool_calls: false,
+        ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
+      })
+
+      if (response.status === "incomplete") {
+        const reason = response.incomplete_details?.reason
+        if (reason === "max_output_tokens") return yield* stop("truncated", "the model hit its output token limit")
+        if (reason === "content_filter") return yield* stop("content-filter", "Azure content filtering blocked the response")
+        return yield* stop("unexpected-status", `response incomplete: ${reason ?? "no reason given"}`)
+      }
+      if (response.status !== "completed") {
+        return yield* stop("unexpected-status", `response ${response.status}: ${response.error?.message ?? "no error given"}`)
+      }
+
+      const calls = response.output.filter((item): item is ResponseFunctionToolCall => item.type === "function_call")
+      if (calls.length === 0) {
+        const answer = response.output_text.trim()
+        if (!answer) return yield* stop("empty-answer", "the model finished without text or tool calls")
+        return { answer, trace, steps: step, state: yield* AgentState.use((state) => state.snapshot) }
+      }
+
+      const outputs: Array<ResponseInputItem> = []
+      for (const call of calls) {
+        const outcome = yield* Effect.result(runToolCall(call))
+        const ok = outcome._tag === "Success"
+        const output = ok ? outcome.success : `Error: ${outcome.failure}`
+        trace.push({ step, tool: call.name, args: call.arguments, ok, output })
+        yield* Console.error(`[step ${step}] ${call.name}(${call.arguments}) ${ok ? "ok" : "failed"}: ${output.slice(0, 160).replaceAll("\n", " ")}`)
+        outputs.push({ type: "function_call_output", call_id: call.call_id, output })
+      }
+      input = outputs
+      previousResponseId = response.id
+    }
+
+    return yield* stop("step-limit", `no answer after ${options.maxSteps} model calls`)
+  })
