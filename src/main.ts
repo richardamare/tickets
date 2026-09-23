@@ -6,6 +6,7 @@ import { Browser, Page } from "./browser.ts"
 import { Foundry } from "./foundry.ts"
 import { Secrets } from "./secrets.ts"
 import { AgentState } from "./state.ts"
+import { watch } from "./watch.ts"
 
 const StateJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Json))
 
@@ -42,7 +43,21 @@ const agent = Command.make(
     ),
 ).pipe(Command.withDescription("Let the model drive the browser to answer <task>"))
 
-const scraper = Command.make("ticket-scraper").pipe(Command.withSubcommands([title, agent]))
+const watchCommand = Command.make(
+  "watch",
+  {
+    urls: Argument.String("url").pipe(Argument.withDescription("Event pages to monitor"), Argument.atLeast(1)),
+    every: Flag.Int("every").pipe(Flag.withDescription("Minutes between rounds of checks (at least 5)"), Flag.withDefault(15)),
+    once: Flag.Boolean("once").pipe(Flag.withDescription("Run one round of checks and exit")),
+    maxSteps: Flag.Int("max-steps").pipe(Flag.withDescription("Model calls per check before giving up"), Flag.withDefault(25)),
+  },
+  ({ urls, every, once, maxSteps }) =>
+    watch(urls, { everyMinutes: every, once, maxSteps }).pipe(
+      Effect.provide(Layer.mergeAll(Browser.layer({ headless: false }), Foundry.layer, Secrets.layer)),
+    ),
+).pipe(Command.withDescription("Check ticket availability on <url>... and report every change"))
+
+const scraper = Command.make("ticket-scraper").pipe(Command.withSubcommands([title, agent, watchCommand]))
 
 // bun run sets npm_package_version from package.json; running the file directly does not.
 const version = Config.NonEmptyString("npm_package_version").pipe(Config.withDefault("unknown"))

@@ -11,7 +11,10 @@ To run:
 ```bash
 bun run start title <url>
 bun run start agent "<task>"
+bun run start watch <event-url>... [--every 15] [--once]
 ```
+
+`watch` has the agent read each event page's availability, every 15 minutes (at least 5), and prints plus notifies on every change. A page behind a bot check, captcha or waiting room is reported as a failed check, never as sold out; `--once` exits non-zero when any check fails. Results are kept in `~/.ticket-scraper/watch.json` (override with `WATCH_STATE_FILE`).
 
 The agent calls the `AZURE_OPENAI_DEPLOYMENT` (default `gpt-5.1`) on Azure AI Foundry as the signed-in `az` CLI user, so run `az login` first.
 
