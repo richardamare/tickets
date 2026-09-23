@@ -48,10 +48,11 @@ export class SeatProviders extends Context.Service<
 const tally = (seats: ReadonlyArray<Seat>, key: (seat: Seat) => string) => {
   const counts = new Map<string, { free: number; total: number }>()
   for (const seat of seats) {
-    const count = counts.get(key(seat)) ?? { free: 0, total: 0 }
+    const k = key(seat)
+    const count = counts.get(k) ?? { free: 0, total: 0 }
     count.total++
     if (seat.available) count.free++
-    counts.set(key(seat), count)
+    counts.set(k, count)
   }
   return counts
 }
@@ -62,7 +63,12 @@ export const describeSeats = (seats: ReadonlyArray<Seat>) => {
   for (const [category, { free, total }] of tally(seats, (seat) => seat.category)) lines.push(`  ${category}: ${free} of ${total} free`)
   lines.push("", "Rows with free seats:")
   const rows = new Map<string, Array<Seat>>()
-  for (const seat of free) rows.set(`${seat.block} ${seat.row}`, [...(rows.get(`${seat.block} ${seat.row}`) ?? []), seat])
+  for (const seat of free) {
+    const row = `${seat.block} ${seat.row}`
+    const rowSeats = rows.get(row)
+    if (rowSeats === undefined) rows.set(row, [seat])
+    else rowSeats.push(seat)
+  }
   for (const [row, rowSeats] of rows) {
     const categories = [...tally(rowSeats, (seat) => seat.category)].map(([category, { free }]) => `${category} ×${free}`)
     lines.push(`  ${row}: ${rowSeats.length} (${categories.join(", ")})`)

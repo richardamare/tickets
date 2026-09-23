@@ -62,42 +62,45 @@ export const decodeSeatmap = (
   const seats: Array<Seat> = []
   for (const area of seatmap.areas)
     for (const block of area.blocks)
-      for (const row of block.rows)
+      for (const row of block.rows) {
+        let position = 0
         for (const segment of row.seats) {
           let seatId = 0
           let x = 0
           let y = 0
           let label: string | undefined
-          for (const [position, [idDelta, dx, dy]] of segment.entries()) {
+          for (const [idDelta, dx, dy] of segment) {
             seatId += idDelta
             x += dx
             y += dy
+            position++
             label ??= nearestLabel(x, y)
-            const category = categoryNames.get(categoryOf.get(seatId) ?? 0)
+            const categoryId = categoryOf.get(seatId)
+            const category = categoryId === undefined ? undefined : categoryNames.get(categoryId)
             // Seats drawn on the map without one of the event's price categories are not for sale.
             if (category === undefined) continue
             seats.push({
               block: block.name,
               row: label,
-              position: position + 1,
+              position,
               category,
               available: status.get(seatId) === 1,
             })
           }
         }
+      }
   return seats
 }
 
-const endpoint = (kind: "seatmap" | "mapping" | "availability") =>
-  new RegExp(`/seatmap/api/public/${kind}/[^/?]+\\?`)
-
-const response = <S extends Schema.Top>(page: PageShape, kind: "seatmap" | "mapping" | "availability", schema: S) =>
-  page.responseText((url) => endpoint(kind).test(url)).pipe(
+const response = <S extends Schema.Top>(page: PageShape, kind: "seatmap" | "mapping" | "availability", schema: S) => {
+  const endpoint = new RegExp(`/seatmap/api/public/${kind}/[^/?]+\\?`)
+  return page.responseText((url) => endpoint.test(url)).pipe(
     Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(schema))),
     Effect.mapError((error) =>
       error._tag === "BrowserError" ? error : new SeatsError({ message: `Eventim's ${kind} response is not what the provider expects: ${error.message}` }),
     ),
   )
+}
 
 const read = (url: URL) =>
   Page.use((page) =>
