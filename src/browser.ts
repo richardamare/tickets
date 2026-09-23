@@ -143,7 +143,7 @@ const lockHolder = async (profile: string) => {
 
 const prepareProfile = async (base: string, profile: string) => {
   if (!(await exists(profile))) {
-    if (!(await exists(join(base, "Default", "Preferences"))) || (await exists(join(base, "SingletonLock")))) {
+    if (!(await exists(join(base, "Default", "Preferences"))) || (await lockHolder(base)) !== undefined) {
       throw new Error(
         `the base profile ${base} is not ready; sign in with \`devbox browser profile open\`, close that Edge window, then retry`,
       )
