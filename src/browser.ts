@@ -1,7 +1,8 @@
 import { chmod, lstat, mkdir, readlink, rm } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
-import { Config, Context, Data, Effect, Layer, Option, Schema, type Scope } from "effect"
+import { Config, Console, Context, Data, Effect, Layer, Option, Schema, type Scope } from "effect"
+import { Flag, GlobalFlag } from "effect/unstable/cli"
 import { chromium, type Locator as PlaywrightLocator, type Page as PlaywrightPage } from "playwright"
 
 export class BrowserError extends Data.TaggedError("BrowserError")<{
@@ -168,6 +169,75 @@ const makePage = (raw: PlaywrightPage): PageShape => ({
   use: (operation, f) => attempt(operation, () => f(raw)),
 })
 
+export const ProfileFlag = GlobalFlag.Setting("profile")({
+  flag: Flag.String("profile").pipe(
+    Flag.withDescription("Run as the Edge profile saved with `profile <name>` instead of the devbox base profile copy"),
+    Flag.optional,
+  ),
+})
+
+const profilesDir = join(homedir(), ".ticket-scraper", "profiles")
+
+const namedProfile = (name: string) =>
+  /^[\w.-]+$/.test(name) && name !== "." && name !== ".."
+    ? Effect.succeed(join(profilesDir, name))
+    : Effect.fail(new BrowserError({ operation: "choose the Edge profile", cause: `"${name}" is not a valid name; use letters, digits, ".", "_" or "-"` }))
+
+const closeOnRelease = (launch: Effect.Effect<{ pid: number; cdpUrl: string }, BrowserError>) =>
+  Effect.acquireRelease(
+    launch.pipe(Effect.withLogSpan("launch")),
+    ({ pid, cdpUrl }) =>
+      Effect.logInfo(`Closing Edge (pid ${pid})`).pipe(
+        Effect.andThen(Effect.promise(() => closeEdge(pid, cdpUrl))),
+        Effect.andThen(Effect.logDebug("Edge closed")),
+      ),
+  )
+
+export const setupProfile = (name: string) =>
+  Effect.gen(function* () {
+    const profile = yield* namedProfile(name)
+    const created = yield* attempt("prepare the Edge profile", async () => {
+      const created = !(await exists(profile))
+      await mkdir(profile, { recursive: true })
+      await unlockProfile(profile)
+      return created
+    })
+    yield* Effect.logInfo(created ? `Created the empty Edge profile ${profile}` : `Reopening the Edge profile ${profile}`)
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const { pid, cdpUrl } = yield* closeOnRelease(launchEdge(profile, { visible: true }))
+        yield* Console.log(`Sign in to every site the "${name}" account needs in the Edge window, then close the window.`)
+        yield* attempt("wait for the Edge window to close", () => waitForWindowsClosed(pid, cdpUrl))
+      }),
+    )
+    yield* Console.log(`Saved the "${name}" profile in ${profile}; run the other commands with --profile ${name} to use it.`)
+  })
+
+const savedProfile = (name: string) =>
+  Effect.gen(function* () {
+    const profile = yield* namedProfile(name)
+    yield* attempt("prepare the Edge profile", async () => {
+      if (!(await exists(join(profile, "Default", "Preferences")))) {
+        throw new Error(`there is no saved profile "${name}"; create it with \`profile ${name}\` first`)
+      }
+      await unlockProfile(profile)
+    })
+    yield* Effect.logInfo(`Using the Edge profile ${profile}`)
+    return profile
+  })
+
+const baseProfileCopy = Effect.gen(function* () {
+  const base = yield* Config.String("EDGE_BASE_PROFILE").pipe(
+    Config.withDefault(join(homedir(), ".devbox", "browser", "edge-base")),
+  )
+  const profile = yield* Config.String("EDGE_PROFILE").pipe(
+    Config.withDefault(join(homedir(), ".ticket-scraper", "edge-profile")),
+  )
+  const cloned = yield* attempt("prepare the Edge profile", () => prepareProfile(base, profile))
+  yield* Effect.logInfo(cloned ? `Cloned the Edge base profile ${base} into ${profile}` : `Using the Edge profile ${profile}`)
+  return profile
+})
+
 export class Browser extends Context.Service<
   Browser,
   {
@@ -177,25 +247,8 @@ export class Browser extends Context.Service<
   static readonly layer = Layer.effect(
     Browser,
     Effect.gen(function* () {
-      const base = yield* Config.String("EDGE_BASE_PROFILE").pipe(
-        Config.withDefault(join(homedir(), ".devbox", "browser", "edge-base")),
-      )
-      const profile = yield* Config.String("EDGE_PROFILE").pipe(
-        Config.withDefault(join(homedir(), ".ticket-scraper", "edge-profile")),
-      )
-      const cloned = yield* attempt("prepare the Edge profile", () => prepareProfile(base, profile))
-      yield* Effect.logInfo(cloned ? `Cloned the Edge base profile ${base} into ${profile}` : `Using the Edge profile ${profile}`)
-      const { cdpUrl } = yield* Effect.acquireRelease(
-        launchEdge(profile).pipe(
-          Effect.tap(({ pid, cdpUrl }) => Effect.logInfo(`Edge started in the background (pid ${pid}, CDP ${cdpUrl})`)),
-          Effect.withLogSpan("launch"),
-        ),
-        ({ pid, cdpUrl }) =>
-          Effect.logInfo(`Closing Edge (pid ${pid})`).pipe(
-            Effect.andThen(Effect.promise(() => closeEdge(pid, cdpUrl))),
-            Effect.andThen(Effect.logDebug("Edge closed")),
-          ),
-      )
+      const profile = yield* Option.match(yield* ProfileFlag, { onSome: savedProfile, onNone: () => baseProfileCopy })
+      const { cdpUrl } = yield* closeOnRelease(launchEdge(profile, { visible: false }))
       const browser = yield* Effect.acquireRelease(
         attempt("attach to Edge", () => chromium.connectOverCDP(cdpUrl)).pipe(Effect.tap(Effect.logDebug("Playwright attached over CDP"))),
         (browser) => attempt("detach from Edge", () => browser.close()).pipe(Effect.ignore({ log: "Warn" })),
@@ -258,6 +311,11 @@ const prepareProfile = async (base: string, profile: string) => {
     await mkdir(dirname(profile), { recursive: true })
     await Bun.$`cp -cR ${base} ${profile}`.quiet()
   }
+  await unlockProfile(profile)
+  return cloned
+}
+
+const unlockProfile = async (profile: string) => {
   await chmod(profile, 0o700)
   const holder = await lockHolder(profile)
   if (holder !== undefined) throw new Error(`Edge (pid ${holder}) is already running on ${profile}`)
@@ -265,28 +323,28 @@ const prepareProfile = async (base: string, profile: string) => {
   for (const name of ["SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"]) {
     await rm(join(profile, name), { force: true })
   }
-  return cloned
 }
 
-const launchEdge = (profile: string) =>
+const launchEdge = (profile: string, { visible }: { readonly visible: boolean }) =>
   attempt("launch Edge", async () => {
     // open -g starts Edge without activating it; -n makes it a separate instance even
     // while an everyday Edge runs. launchd owns the process, so Ctrl+C here does not kill it mid-write.
-    await Bun.$`open -g -n -a ${edgeApp} --args ${[
+    await Bun.$`open ${visible ? [] : ["-g"]} -n -a ${edgeApp} --args ${[
       `--user-data-dir=${profile}`,
       "--remote-debugging-address=127.0.0.1",
       "--remote-debugging-port=0",
       "--no-first-run",
       "--no-default-browser-check",
       // No window until a page is opened, since the first window would otherwise take focus.
-      "--no-startup-window",
+      ...(visible ? [] : ["--no-startup-window"]),
       // Pages stay in background tabs, which Edge would otherwise throttle or stop rendering.
       "--disable-background-timer-throttling",
       "--disable-backgrounding-occluded-windows",
       "--disable-renderer-backgrounding",
     ]}`.quiet()
     try {
-      const cdpUrl = await waitForCdp(profile)
+      // A sign-in page is expected in a visible window, since signing in is what it is for.
+      const cdpUrl = await waitForCdp(profile, { signInAllowed: visible })
       const pid = await lockHolder(profile)
       if (pid === undefined) throw new Error(`Edge exposed CDP at ${cdpUrl} but holds no lock on ${profile}`)
       return { pid, cdpUrl }
@@ -297,22 +355,25 @@ const launchEdge = (profile: string) =>
     }
   })
 
-const CdpTargets = Schema.fromJsonString(Schema.Array(Schema.Struct({ url: Schema.String })))
+const CdpTargets = Schema.fromJsonString(Schema.Array(Schema.Struct({ type: Schema.String, url: Schema.String })))
 const CdpVersion = Schema.fromJsonString(Schema.Struct({ webSocketDebuggerUrl: Schema.String }))
 const CdpCommand = Schema.fromJsonString(Schema.Struct({ id: Schema.Number, method: Schema.String }))
 
-const waitForCdp = async (profile: string) => {
+const listTargets = (cdpUrl: string) =>
+  fetch(`${cdpUrl}/json/list`).then(
+    async (response) => (response.ok ? Schema.decodeUnknownPromise(CdpTargets)(await response.text()) : undefined),
+    () => undefined,
+  )
+
+const waitForCdp = async (profile: string, { signInAllowed }: { readonly signInAllowed: boolean }) => {
   for (let attempt = 0; attempt < 40; attempt++) {
     // With port 0, Edge picks a free port and writes it on the first line of DevToolsActivePort.
     const port = Number((await Bun.file(join(profile, "DevToolsActivePort")).text().catch(() => "")).split("\n")[0])
     if (port > 0) {
       const cdpUrl = `http://127.0.0.1:${port}`
-      const targets = await fetch(`${cdpUrl}/json/list`).then(
-        async (response) => (response.ok ? Schema.decodeUnknownPromise(CdpTargets)(await response.text()) : undefined),
-        () => undefined,
-      )
+      const targets = await listTargets(cdpUrl)
       if (targets) {
-        if (targets.some((target) => target.url.startsWith("edge://force-signin"))) {
+        if (!signInAllowed && targets.some((target) => target.url.startsWith("edge://force-signin"))) {
           throw new Error(
             `Edge asks for an interactive sign-in, so the base profile's sign-in did not carry over; sign in to the base profile, close it, delete ${profile} and retry`,
           )
@@ -323,6 +384,20 @@ const waitForCdp = async (profile: string) => {
     await Bun.sleep(250)
   }
   throw new Error("Edge did not expose its CDP endpoint within 10 seconds")
+}
+
+// On macOS Edge keeps running after its last window closes, so that is detected as no page targets left.
+const waitForWindowsClosed = async (pid: number, cdpUrl: string) => {
+  let opened = false
+  while (isAlive(pid)) {
+    const targets = await listTargets(cdpUrl)
+    if (targets) {
+      const open = targets.some((target) => target.type === "page")
+      if (open) opened = true
+      else if (opened) return
+    }
+    await Bun.sleep(500)
+  }
 }
 
 // Browser.close lets Edge flush the profile to disk; SIGTERM is the fallback when it does not exit in time.

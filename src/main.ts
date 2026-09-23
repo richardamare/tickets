@@ -2,7 +2,7 @@ import { BunRuntime, BunServices } from "@effect/platform-bun"
 import { Config, Console, Effect, Layer, Schema } from "effect"
 import { Argument, Command, Flag } from "effect/unstable/cli"
 import { runAgent } from "./agent.ts"
-import { Browser, Page } from "./browser.ts"
+import { Browser, Page, ProfileFlag, setupProfile } from "./browser.ts"
 import { Foundry } from "./foundry.ts"
 import { eventim } from "./providers/eventim.ts"
 import { describeSeats, SeatProviders, SeatsJson } from "./seats.ts"
@@ -86,7 +86,20 @@ const seats = Command.make(
     ),
 ).pipe(Command.withDescription("Read the seating chart of <url> and list the free seats"))
 
-const scraper = Command.make("ticket-scraper").pipe(Command.withSubcommands([title, agent, watchCommand, seats]))
+const profile = Command.make(
+  "profile",
+  { name: Argument.String("name").pipe(Argument.withDescription("Name of the account, used later as --profile <name>")) },
+  ({ name }) => setupProfile(name),
+).pipe(
+  Command.withDescription(
+    "Open Edge on the saved profile <name>, empty the first time, for you to sign in; the profile is saved when you close the window",
+  ),
+)
+
+const scraper = Command.make("ticket-scraper").pipe(
+  Command.withSubcommands([title, agent, watchCommand, seats, profile]),
+  Command.withGlobalFlags([ProfileFlag]),
+)
 
 // bun run sets npm_package_version from package.json; running the file directly does not.
 const version = Config.NonEmptyString("npm_package_version").pipe(Config.withDefault("unknown"))
