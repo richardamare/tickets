@@ -13,7 +13,7 @@ const scraper = Command.make("ticket-scraper", { url }, ({ url }) =>
       return page.title()
     })
     yield* Console.log(title)
-  }).pipe(Effect.provide(Browser.layer())),
+  }).pipe(Effect.provide(Browser.layer({ headless: false }))),
 ).pipe(Command.withDescription("Print the title of the page at <url>"))
 
 // bun run sets npm_package_version from package.json; running the file directly does not.
