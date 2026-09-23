@@ -13,6 +13,7 @@ import { statuses, watch } from "./watch.ts"
 const StateJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Json))
 
 const PageLive = Page.layer.pipe(Layer.provide(Browser.layer))
+const SeatProvidersLive = SeatProviders.layer([eventim])
 
 const title = Command.make(
   "title",
@@ -41,7 +42,7 @@ const agent = Command.make(
           yield* Console.error(`[state] ${yield* Schema.encodeEffect(StateJson)(state)}`)
         }),
       ),
-      Effect.provide(Layer.mergeAll(PageLive, Foundry.layer, AgentState.layer, Secrets.layer)),
+      Effect.provide(Layer.mergeAll(PageLive, Foundry.layer, AgentState.layer, Secrets.layer, SeatProvidersLive)),
     ),
 ).pipe(Command.withDescription("Let the model drive the browser to answer <task>"))
 
@@ -66,7 +67,7 @@ const watchCommand = Command.make(
   },
   ({ urls, every, once, maxSteps, until }) =>
     watch(urls, { everyMinutes: every, once, maxSteps, until }).pipe(
-      Effect.provide(Layer.mergeAll(Browser.layer, Foundry.layer, Secrets.layer)),
+      Effect.provide(Layer.mergeAll(Browser.layer, Foundry.layer, Secrets.layer, SeatProvidersLive)),
     ),
 ).pipe(Command.withDescription("Check ticket availability on <url>... and report every change, until each page reaches an --until status"))
 
@@ -81,7 +82,7 @@ const seats = Command.make(
       Effect.flatMap(({ provider, url }) => provider.read(url).pipe(Effect.provide(PageLive))),
       Effect.flatMap((seats) => (json ? Schema.encodeEffect(SeatsJson)(seats) : Effect.succeed(describeSeats(seats)))),
       Effect.flatMap(Console.log),
-      Effect.provide(SeatProviders.layer([eventim])),
+      Effect.provide(SeatProvidersLive),
     ),
 ).pipe(Command.withDescription("Read the seating chart of <url> and list the free seats"))
 

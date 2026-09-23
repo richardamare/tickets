@@ -2,6 +2,7 @@ import { Console, Data, Effect, Option, Redacted, Schema } from "effect"
 import type { FunctionTool, ResponseFunctionToolCall, ResponseInputItem } from "openai/resources/responses/responses"
 import { BrowserError, Locator, Page } from "./browser.ts"
 import { Foundry } from "./foundry.ts"
+import { describeSeats, type Seat, SeatProviders, type SeatsError } from "./seats.ts"
 import { type SecretError, Secrets } from "./secrets.ts"
 import { AgentState, type StateError } from "./state.ts"
 
@@ -19,6 +20,8 @@ Work in three steps.
 3. Answer. Call state_read and write the answer from the state alone, with the URL each item came from.
 
 Every click is a real mouse click: the cursor travels to the element and presses it. When the target is covered, the click is not made and the error names what covers it. A cursor passing over a menu or map region can open a dropdown or tooltip on the way, and marketing popups appear on their own. Clear it before trying again: click an empty spot such as a page heading or the side panel, then click the target once more, reaching it from a different direction if the same thing opens again. After each click, read the part of the page it should change (a selected count, a panel, the URL) and confirm it did what you meant; when it changed something else instead, such as a filter or a tab, set that back before you continue.
+
+On a site with a seat provider, read seats with list_free_seats and reserve them with add_seats_to_cart rather than clicking through the seat map yourself. A cart holds seats for a few minutes and costs nothing. Never enter payment details or confirm a purchase.
 
 When a page asks you to sign in, call list_secrets and enter each credential with fill_secret by name; the values stay hidden from you, so every credential goes through fill_secret.
 `.trim()
@@ -43,7 +46,7 @@ export class AgentError extends Data.TaggedError("AgentError")<{
 
 type Tool = {
   readonly definition: FunctionTool
-  readonly run: (rawArgs: string) => Effect.Effect<string, string, Page | AgentState | Secrets>
+  readonly run: (rawArgs: string) => Effect.Effect<string, string, Page | AgentState | Secrets | SeatProviders>
 }
 
 const tool = <S extends Schema.Top>(
@@ -54,8 +57,8 @@ const tool = <S extends Schema.Top>(
     args: S["Type"],
   ) => Effect.Effect<
     string,
-    BrowserError | StateError | SecretError | Schema.SchemaError,
-    Page | AgentState | Secrets | S["DecodingServices"]
+    BrowserError | StateError | SecretError | SeatsError | Schema.SchemaError,
+    Page | AgentState | Secrets | SeatProviders | S["DecodingServices"]
   >,
 ) => ({
   definition: {
@@ -244,7 +247,60 @@ export const secretTools: ReadonlyArray<Tool> = [
   ),
 ]
 
-const tools = [...browserTools, ...stateTools, ...secretTools]
+const SeatsFilter = Schema.Struct({
+  url: Schema.String.annotate({ description: "Event page URL" }),
+  category: Schema.optionalKey(Schema.String.annotate({ description: "Only this price category, e.g. 'Price 2'" })),
+  block: Schema.optionalKey(Schema.String.annotate({ description: "Only this block, e.g. 'Orchestre'" })),
+})
+
+export const seatTools: ReadonlyArray<Tool> = [
+  tool(
+    "list_free_seats",
+    "Read the event's seating chart through the site's seat provider. Returns free seats per category and row; with category or block it also lists each matching free seat as 'id block row position category' for add_seats_to_cart. position is the order within the row, so consecutive positions sit next to each other. The site refuses a selection that leaves a single free seat alone between taken seats or the row's end; a seat marked 'leaves a single gap' would do that when booked on its own, so book it together with that neighbour or choose another.",
+    SeatsFilter,
+    ({ url, category, block }) =>
+      Effect.gen(function* () {
+        const { provider, url: parsed } = yield* SeatProviders.use((providers) => providers.providerFor(url))
+        const seats = yield* provider.read(parsed)
+        const summary = describeSeats(seats)
+        if (category === undefined && block === undefined) return cap(summary)
+        const matching = seats.filter(
+          (seat) => seat.available && (category === undefined || seat.category === category) && (block === undefined || seat.block === block),
+        )
+        const rows = new Map<string, Map<number, boolean>>()
+        for (const seat of seats) {
+          const row = rows.get(`${seat.block} ${seat.row}`) ?? new Map<number, boolean>()
+          row.set(seat.position, seat.available)
+          rows.set(`${seat.block} ${seat.row}`, row)
+        }
+        const leavesGap = (seat: Seat) => {
+          const row = rows.get(`${seat.block} ${seat.row}`)!
+          const free = (position: number) => row.get(position) === true
+          return (free(seat.position - 1) && !free(seat.position - 2)) || (free(seat.position + 1) && !free(seat.position + 2))
+        }
+        const lines = matching.map(
+          (seat) => `${seat.id} ${seat.block} ${seat.row} ${seat.position} ${seat.category}${leavesGap(seat) ? " (leaves a single gap)" : ""}`,
+        )
+        return cap(`${summary}\n\nMatching free seats (${matching.length}):\n${lines.join("\n")}`)
+      }),
+  ),
+  tool(
+    "add_seats_to_cart",
+    "Select the given seats on the event's seating chart with the mouse and put them in the cart, stopping before payment. Returns the cart page URL and what the cart holds.",
+    Schema.Struct({
+      url: Schema.String.annotate({ description: "Event page URL" }),
+      seatIds: Schema.Array(Schema.String).annotate({ description: "Seat ids from list_free_seats" }),
+    }),
+    ({ url, seatIds }) =>
+      Effect.gen(function* () {
+        const { provider, url: parsed } = yield* SeatProviders.use((providers) => providers.providerFor(url))
+        const cart = yield* provider.addToCart(parsed, seatIds)
+        return cap(`Cart at ${cart.url}:\n${cart.contents}`)
+      }),
+  ),
+]
+
+const tools = [...browserTools, ...seatTools, ...stateTools, ...secretTools]
 
 const instructions = `${INSTRUCTIONS}\n\nYour tools:\n${tools
   .map(({ definition }) => `- ${definition.name}: ${definition.description}`)
