@@ -35,6 +35,7 @@ export interface LocatorShape {
   readonly getAttribute: (name: string) => Effect.Effect<Option.Option<string>, BrowserError>
   readonly isVisible: Effect.Effect<boolean, BrowserError>
   readonly waitFor: Effect.Effect<void, BrowserError>
+  readonly dispatchEvent: (type: string) => Effect.Effect<void, BrowserError>
 }
 
 const makeLocator = (raw: PlaywrightLocator): LocatorShape => ({
@@ -54,6 +55,7 @@ const makeLocator = (raw: PlaywrightLocator): LocatorShape => ({
     attempt(`read ${name} of ${raw}`, () => raw.getAttribute(name)).pipe(Effect.map(Option.fromNullOr)),
   isVisible: attempt(`check visibility of ${raw}`, () => raw.isVisible()),
   waitFor: attempt(`wait for ${raw}`, () => raw.waitFor()),
+  dispatchEvent: (type) => attempt(`dispatch ${type} on ${raw}`, () => raw.dispatchEvent(type)),
 })
 
 export interface PageShape {
@@ -67,6 +69,7 @@ export interface PageShape {
   readonly getByText: (text: string | RegExp, options?: TextOptions) => LocatorShape
   readonly waitForLoad: Effect.Effect<void, BrowserError>
   readonly screenshot: (path: string) => Effect.Effect<void, BrowserError>
+  readonly responseText: (matches: (url: string) => boolean) => Effect.Effect<string, BrowserError>
   readonly use: <A>(operation: string, f: (page: PlaywrightPage) => Promise<A>) => Effect.Effect<A, BrowserError>
 }
 
@@ -81,6 +84,10 @@ const makePage = (raw: PlaywrightPage): PageShape => ({
   getByText: (text, options) => makeLocator(raw.getByText(text, options)),
   waitForLoad: attempt("wait for page load", () => raw.waitForLoadState("domcontentloaded")),
   screenshot: (path) => attempt(`screenshot to ${path}`, () => raw.screenshot({ path })),
+  responseText: (matches) =>
+    attempt("wait for a response", () =>
+      raw.waitForResponse((response) => response.ok() && matches(response.url())).then((response) => response.text()),
+    ),
   use: (operation, f) => attempt(operation, () => f(raw)),
 })
 
