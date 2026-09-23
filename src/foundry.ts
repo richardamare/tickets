@@ -26,7 +26,10 @@ export class Foundry extends Context.Service<
       const endpoint = yield* Config.String("AZURE_OPENAI_ENDPOINT").pipe(
         Config.withDefault("https://foundry-amare-sandbox.cognitiveservices.azure.com/"),
       )
-      const deployment = yield* Config.String("AZURE_OPENAI_DEPLOYMENT").pipe(Config.withDefault("gpt-5.1"))
+      const deployment = yield* Config.String("AZURE_OPENAI_DEPLOYMENT").pipe(Config.withDefault("gpt-5.4"))
+      const effort = yield* Config.Literals(["none", "minimal", "low", "medium", "high", "xhigh"], "AZURE_OPENAI_REASONING_EFFORT").pipe(
+        Config.withDefault("low"),
+      )
       const apiVersion = yield* Config.String("AZURE_OPENAI_API_VERSION").pipe(Config.withDefault("2025-04-01-preview"))
       const tenantId = yield* Config.String("AZURE_TENANT_ID").pipe(
         Config.withDefault("97371585-85c1-4049-921c-7b8043f0d757"),
@@ -45,7 +48,11 @@ export class Foundry extends Context.Service<
         deployment,
         respond: (params) =>
           Effect.tryPromise({
-            try: (signal) => client.responses.create({ ...params, model: deployment, stream: false }, { signal }),
+            try: (signal) =>
+              client.responses.create(
+                { ...params, reasoning: { effort, ...params.reasoning }, model: deployment, stream: false },
+                { signal },
+              ),
             catch: (cause) => new FoundryError({ deployment, cause }),
           }),
       }
