@@ -130,9 +130,9 @@ export const browserTools: ReadonlyArray<Tool> = [
     ({ selector }) =>
       Effect.gen(function* () {
         const base = yield* pageUrl
-        const linkSelector = `${selector ?? "body"} a[href]`
-        const links = yield* Locator.use((locator) => locator.all).pipe(Locator.at(linkSelector))
-        if (links.length === 0) return yield* noMatch(linkSelector)
+        const scope = selector ?? "body"
+        const links = yield* Locator.use((locator) => locator.locator("a[href]").all).pipe(Locator.at(scope))
+        if (links.length === 0) return yield* noMatch(`${scope} >> a[href]`)
         const rows = yield* Effect.forEach(
           links,
           (link) =>
