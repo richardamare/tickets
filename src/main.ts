@@ -4,6 +4,8 @@ import { Argument, Command, Flag } from "effect/unstable/cli"
 import { runAgent } from "./agent.ts"
 import { Browser, Page } from "./browser.ts"
 import { Foundry } from "./foundry.ts"
+import { eventim } from "./providers/eventim.ts"
+import { describeSeats, SeatProviders, SeatsJson } from "./seats.ts"
 import { Secrets } from "./secrets.ts"
 import { AgentState } from "./state.ts"
 import { statuses, watch } from "./watch.ts"
@@ -68,7 +70,22 @@ const watchCommand = Command.make(
     ),
 ).pipe(Command.withDescription("Check ticket availability on <url>... and report every change, until each page reaches an --until status"))
 
-const scraper = Command.make("ticket-scraper").pipe(Command.withSubcommands([title, agent, watchCommand]))
+const seats = Command.make(
+  "seats",
+  {
+    url: Argument.String("url").pipe(Argument.withDescription("Event page with a seating chart")),
+    json: Flag.Boolean("json").pipe(Flag.withDescription("Print every seat as JSON"), Flag.withDefault(false)),
+  },
+  ({ url, json }) =>
+    SeatProviders.use((providers) => providers.providerFor(url)).pipe(
+      Effect.flatMap(({ provider, url }) => provider.read(url).pipe(Effect.provide(PageLive))),
+      Effect.flatMap((seats) => (json ? Schema.encodeEffect(SeatsJson)(seats) : Effect.succeed(describeSeats(seats)))),
+      Effect.flatMap(Console.log),
+      Effect.provide(SeatProviders.layer([eventim])),
+    ),
+).pipe(Command.withDescription("Read the seating chart of <url> and list the free seats"))
+
+const scraper = Command.make("ticket-scraper").pipe(Command.withSubcommands([title, agent, watchCommand, seats]))
 
 // bun run sets npm_package_version from package.json; running the file directly does not.
 const version = Config.NonEmptyString("npm_package_version").pipe(Config.withDefault("unknown"))
