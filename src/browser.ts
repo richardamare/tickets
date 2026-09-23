@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, readFile, readlink, rm } from "node:fs/promises"
+import { chmod, lstat, mkdir, readlink, rm } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { Config, Context, Data, Effect, Layer, Option, type Scope } from "effect"
@@ -187,7 +187,7 @@ const waitForCdp = async (edge: Bun.Subprocess, profile: string) => {
   for (let attempt = 0; attempt < 40; attempt++) {
     if (edge.exitCode !== null) throw new Error(`Edge exited with code ${edge.exitCode} before exposing CDP`)
     // With port 0, Edge picks a free port and writes it on the first line of DevToolsActivePort.
-    const port = Number((await readFile(join(profile, "DevToolsActivePort"), "utf8").catch(() => "")).split("\n")[0])
+    const port = Number((await Bun.file(join(profile, "DevToolsActivePort")).text().catch(() => "")).split("\n")[0])
     if (port > 0) {
       const cdpUrl = `http://127.0.0.1:${port}`
       const targets = await fetch(`${cdpUrl}/json/list`).then(
