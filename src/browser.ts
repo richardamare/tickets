@@ -1,7 +1,7 @@
 import { chmod, lstat, mkdir, readlink, rm } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
-import { Config, Context, Data, Effect, Layer, Option, type Scope } from "effect"
+import { Config, Context, Data, Effect, Layer, Option, Schema, type Scope } from "effect"
 import { chromium, type Locator as PlaywrightLocator, type Page as PlaywrightPage } from "playwright"
 
 export class BrowserError extends Data.TaggedError("BrowserError")<{
@@ -183,6 +183,10 @@ const launchEdge = (profile: string) =>
     }
   })
 
+const CdpTargets = Schema.fromJsonString(Schema.Array(Schema.Struct({ url: Schema.String })))
+const CdpVersion = Schema.fromJsonString(Schema.Struct({ webSocketDebuggerUrl: Schema.String }))
+const CdpCommand = Schema.fromJsonString(Schema.Struct({ id: Schema.Number, method: Schema.String }))
+
 const waitForCdp = async (edge: Bun.Subprocess, profile: string) => {
   for (let attempt = 0; attempt < 40; attempt++) {
     if (edge.exitCode !== null) throw new Error(`Edge exited with code ${edge.exitCode} before exposing CDP`)
@@ -191,7 +195,7 @@ const waitForCdp = async (edge: Bun.Subprocess, profile: string) => {
     if (port > 0) {
       const cdpUrl = `http://127.0.0.1:${port}`
       const targets = await fetch(`${cdpUrl}/json/list`).then(
-        (response) => (response.ok ? (response.json() as Promise<ReadonlyArray<{ url: string }>>) : undefined),
+        async (response) => (response.ok ? Schema.decodeUnknownPromise(CdpTargets)(await response.text()) : undefined),
         () => undefined,
       )
       if (targets) {
@@ -211,11 +215,12 @@ const waitForCdp = async (edge: Bun.Subprocess, profile: string) => {
 // Browser.close lets Edge flush the profile to disk; SIGTERM is the fallback when it does not exit in time.
 const closeEdge = async (edge: Bun.Subprocess, cdpUrl: string) => {
   const version = await fetch(`${cdpUrl}/json/version`)
-    .then((response) => response.json() as Promise<{ webSocketDebuggerUrl: string }>)
+    .then(async (response) => Schema.decodeUnknownPromise(CdpVersion)(await response.text()))
     .catch(() => undefined)
   if (version) {
+    const command = await Schema.encodePromise(CdpCommand)({ id: 1, method: "Browser.close" })
     const socket = new WebSocket(version.webSocketDebuggerUrl)
-    socket.addEventListener("open", () => socket.send(JSON.stringify({ id: 1, method: "Browser.close" })))
+    socket.addEventListener("open", () => socket.send(command))
     socket.addEventListener("error", () => socket.close())
   }
   const exited = await Promise.race([edge.exited.then(() => true), Bun.sleep(10_000).then(() => false)])
