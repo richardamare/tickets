@@ -1,7 +1,6 @@
 import { BunRuntime, BunServices } from "@effect/platform-bun"
-import { Console, Effect } from "effect"
+import { Config, Console, Effect } from "effect"
 import { Argument, Command } from "effect/unstable/cli"
-import { version } from "../package.json"
 import { Browser } from "./browser.ts"
 
 const url = Argument.String("url").pipe(Argument.withDescription("Page to open"))
@@ -17,4 +16,9 @@ const scraper = Command.make("ticket-scraper", { url }, ({ url }) =>
   }).pipe(Effect.provide(Browser.layer())),
 ).pipe(Command.withDescription("Print the title of the page at <url>"))
 
-Command.run(scraper, { version }).pipe(Effect.provide(BunServices.layer), BunRuntime.runMain)
+// bun run sets npm_package_version from package.json; running the file directly does not.
+const version = Config.NonEmptyString("npm_package_version").pipe(Config.withDefault("unknown"))
+
+Effect.gen(function* () {
+  yield* Command.run(scraper, { version: yield* version })
+}).pipe(Effect.provide(BunServices.layer), BunRuntime.runMain)
