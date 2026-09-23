@@ -1,5 +1,6 @@
 {
   "name": "ticket-scraper",
+  "version": "0.1.0",
   "module": "src/main.ts",
   "type": "module",
   "private": true,
@@ -9,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@effect/platform-bun": "^4.0.0-rc.117",
     "effect": "^4.0.0-rc.117",
     "playwright": "^1.63.0"
   },
