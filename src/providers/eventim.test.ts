@@ -44,9 +44,9 @@ test("seat ids, positions, categories and availability are decoded from their de
   )
 
   expect(seats).toEqual([
-    { block: "Orchestre", row: "A", position: 1, category: "Cat 1", available: true },
-    { block: "Orchestre", row: "A", position: 2, category: "Cat 1", available: false },
-    { block: "Orchestre", row: "B", position: 2, category: "Cat 2", available: true },
+    { id: "100", block: "Orchestre", row: "A", position: 1, category: "Cat 1", available: true },
+    { id: "101", block: "Orchestre", row: "A", position: 2, category: "Cat 1", available: false },
+    { id: "201", block: "Orchestre", row: "B", position: 2, category: "Cat 2", available: true },
   ])
 })
 

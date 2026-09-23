@@ -29,6 +29,7 @@ export interface LocatorShape {
   readonly all: Effect.Effect<ReadonlyArray<LocatorShape>, BrowserError>
   readonly count: Effect.Effect<number, BrowserError>
   readonly mouseClick: Effect.Effect<void, BrowserError>
+  readonly mouseDrag: (by: { readonly x: number; readonly y: number }) => Effect.Effect<void, BrowserError>
   readonly fill: (value: string) => Effect.Effect<void, BrowserError>
   readonly innerText: Effect.Effect<string, BrowserError>
   readonly allInnerTexts: Effect.Effect<ReadonlyArray<string>, BrowserError>
@@ -92,6 +93,20 @@ const mouseClick = async (locator: PlaywrightLocator) => {
   await page.mouse.up()
 }
 
+const mouseDrag = async (locator: PlaywrightLocator, by: { readonly x: number; readonly y: number }) => {
+  // A drag that starts below the fold scrolls the page instead of moving the element, so centre it first.
+  await locator.evaluate((element) => element.scrollIntoView({ block: "center", inline: "center" }))
+  const box = await locator.boundingBox()
+  if (!box) throw new Error("the element has no box on screen")
+  const page = locator.page()
+  const from = { x: box.x + box.width * between(0.4, 0.6), y: box.y + box.height * between(0.4, 0.6) }
+  await moveMouse(page, from)
+  await page.mouse.down()
+  await moveMouse(page, { x: from.x + by.x, y: from.y + by.y })
+  await Bun.sleep(between(40, 110))
+  await page.mouse.up()
+}
+
 const makeLocator = (raw: PlaywrightLocator): LocatorShape => ({
   raw,
   locator: (selector) => makeLocator(raw.locator(selector)),
@@ -102,6 +117,7 @@ const makeLocator = (raw: PlaywrightLocator): LocatorShape => ({
   all: attempt(`list ${raw}`, () => raw.all()).pipe(Effect.map((locators) => locators.map(makeLocator))),
   count: attempt(`count ${raw}`, () => raw.count()),
   mouseClick: attempt(`mouse-click ${raw}`, () => mouseClick(raw)),
+  mouseDrag: (by) => attempt(`mouse-drag ${raw}`, () => mouseDrag(raw, by)),
   fill: (value) => attempt(`fill ${raw}`, () => raw.fill(value)),
   innerText: attempt(`read text of ${raw}`, () => raw.innerText()),
   allInnerTexts: attempt(`read texts of ${raw}`, () => raw.allInnerTexts()),

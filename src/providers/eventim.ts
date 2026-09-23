@@ -60,36 +60,44 @@ export const decodeSeatmap = (
     }, undefined)?.text ?? "?"
 
   const seats: Array<Seat> = []
+  let label = "?"
+  for (const seat of layout(seatmap)) {
+    if (seat.startsSegment) label = nearestLabel(seat.x, seat.y)
+    const categoryId = categoryOf.get(seat.id)
+    const category = categoryId === undefined ? undefined : categoryNames.get(categoryId)
+    // Seats drawn on the map without one of the event's price categories are not for sale.
+    if (category === undefined) continue
+    seats.push({
+      id: String(seat.id),
+      block: seat.block,
+      row: label,
+      position: seat.position,
+      category,
+      available: status.get(seat.id) === 1,
+    })
+  }
+  return seats
+}
+
+// Every seat with its map coordinates, which are also the cx and cy of its circle once the map draws it.
+function* layout(seatmap: typeof SeatmapJson.Type) {
   for (const area of seatmap.areas)
     for (const block of area.blocks)
       for (const row of block.rows) {
         let position = 0
         for (const segment of row.seats) {
-          let seatId = 0
+          let id = 0
           let x = 0
           let y = 0
-          let label: string | undefined
-          for (const [idDelta, dx, dy] of segment) {
-            seatId += idDelta
+          for (const [index, [idDelta, dx, dy]] of segment.entries()) {
+            id += idDelta
             x += dx
             y += dy
             position++
-            label ??= nearestLabel(x, y)
-            const categoryId = categoryOf.get(seatId)
-            const category = categoryId === undefined ? undefined : categoryNames.get(categoryId)
-            // Seats drawn on the map without one of the event's price categories are not for sale.
-            if (category === undefined) continue
-            seats.push({
-              block: block.name,
-              row: label,
-              position,
-              category,
-              available: status.get(seatId) === 1,
-            })
+            yield { id, x, y, block: block.name, position, startsSegment: index === 0 }
           }
         }
       }
-  return seats
 }
 
 const response = <S extends Schema.Top>(page: PageShape, kind: "seatmap" | "mapping" | "availability", schema: S) => {
@@ -102,12 +110,52 @@ const response = <S extends Schema.Top>(page: PageShape, kind: "seatmap" | "mapp
   )
 }
 
+const seatingChart = "a.seat-switch:has(.icon-seatmap)"
+const cartButton = ".seatmap-tab button.btn-primary:not(.disabled):has-text('Ticket')"
+// Clicking this heading closes a hover menu or tooltip and leaves the cursor clear of the map's controls.
+const clearSpot = ".seatmap-tab >> text=Selected seats & discount"
+
+// Sleeknote marketing popups cover the page under a randomised tag name.
+const removePopups = (page: PageShape) =>
+  page.use("remove popups", (raw) =>
+    raw.locator("*").evaluateAll((elements) => {
+      for (const element of elements) if (element.tagName.startsWith("SLEEKNOTE")) element.remove()
+    }),
+  )
+
+const click = (page: PageShape, selector: string, clear = clearSpot) => {
+  const once = removePopups(page).pipe(Effect.andThen(page.locator(selector).first().mouseClick))
+  return once.pipe(
+    Effect.tapError(() => page.locator(clear).first().mouseClick.pipe(Effect.ignore)),
+    Effect.retry({ times: 2 }),
+  )
+}
+
+// consentmanager's banner covers the page until answered; declining keeps the site working.
+const declineConsent = (page: PageShape) =>
+  Effect.gen(function* () {
+    const decline = ".cmpboxbtnno"
+    const shown = yield* page.use("look for the consent banner", (raw) =>
+      raw.locator(decline).first().waitFor({ state: "visible", timeout: 3_000 }).then(
+        () => true,
+        () => false,
+      ),
+    )
+    if (!shown) return
+    yield* page.locator(decline).first().mouseClick
+  })
+
+const openSeatingChart = (page: PageShape, url: URL) =>
+  Effect.gen(function* () {
+    yield* page.goto(url.href)
+    yield* declineConsent(page)
+    if ((yield* page.locator(seatingChart).count) === 0) return yield* new SeatsError({ message: `${url} offers no seating chart; pass the event page, …/event/…` })
+  })
+
 const read = (url: URL) =>
   Page.use((page) =>
     Effect.gen(function* () {
-      yield* page.goto(url.href)
-      const seatingChart = page.locator("a.seat-switch:has(.icon-seatmap)")
-      if ((yield* seatingChart.count) === 0) return yield* new SeatsError({ message: `${url} offers no seating chart` })
+      yield* openSeatingChart(page, url)
       // The seat map requests fire on the click, so listen for them before clicking.
       const responses = yield* Effect.forkChild(
         Effect.all(
@@ -116,9 +164,108 @@ const read = (url: URL) =>
         ),
       )
       yield* Effect.yieldNow
-      yield* seatingChart.first().mouseClick
+      yield* click(page, seatingChart, "h1")
       const [seatmap, mapping, availability] = yield* Fiber.join(responses)
       return decodeSeatmap(seatmap, mapping, availability)
+    }),
+  )
+
+// The map draws single seats only when zoomed in, and zooms around its centre.
+const zoomToSeats = (page: PageShape) =>
+  Effect.gen(function* () {
+    for (let level = 0; level < 8; level++) {
+      if ((yield* page.locator("g.seats circle.s").count) > 0) return
+      yield* click(page, ".seatmap-tab .js-zoom-in")
+      yield* Effect.sleep("1500 millis")
+    }
+    return yield* new SeatsError({ message: "the seat map did not draw single seats after zooming in 8 times" })
+  })
+
+type Matrix = { readonly a: number; readonly b: number; readonly c: number; readonly d: number; readonly e: number; readonly f: number }
+
+// The map draws only the seats inside its view, so a seat is found by its map coordinates and dragged into
+// the view until the map draws it, well clear of the controls along the view's top edge.
+const bringIntoView = (page: PageShape, seatId: string, point: { readonly x: number; readonly y: number }) =>
+  Effect.gen(function* () {
+    for (let drag = 0; drag < 12; drag++) {
+      const offset = yield* page.use(`locate seat ${seatId}`, (raw) =>
+        raw.locator("g.seats").first().evaluate((group, { x, y }) => {
+          const ctm = (group as unknown as { getScreenCTM(): Matrix | null }).getScreenCTM()
+          const view = group.ownerDocument.querySelector(".js-seatmap-view")?.getBoundingClientRect()
+          if (!ctm || !view) return undefined
+          const screenX = ctm.a * x + ctm.c * y + ctm.e
+          const screenY = ctm.b * x + ctm.d * y + ctm.f
+          const inside = screenX > view.left + 60 && screenX < view.right - 60 && screenY > view.top + 140 && screenY < view.bottom - 60
+          if (inside) return { x: 0, y: 0 }
+          const clamp = (value: number) => Math.max(-250, Math.min(250, value))
+          return { x: clamp(view.left + view.width / 2 - screenX), y: clamp(view.top + view.height / 2 - screenY) }
+        }, point),
+      )
+      if (offset === undefined) return yield* new SeatsError({ message: "the seat map has no view to drag" })
+      if (offset.x === 0 && offset.y === 0) {
+        yield* page.locator(`#s${seatId}`).first().waitFor
+        return
+      }
+      yield* page.locator(".js-seatmap-view").mouseDrag(offset)
+      yield* Effect.sleep("500 millis")
+    }
+    return yield* new SeatsError({ message: `could not drag seat ${seatId} into view` })
+  })
+
+const addToCart = (url: URL, seatIds: ReadonlyArray<string>) =>
+  Page.use((page) =>
+    Effect.gen(function* () {
+      if (seatIds.length === 0) return yield* new SeatsError({ message: "no seats given" })
+      yield* openSeatingChart(page, url)
+      const geometry = yield* Effect.forkChild(response(page, "seatmap", SeatmapJson))
+      yield* Effect.yieldNow
+      yield* click(page, seatingChart, "h1")
+      const positions = new Map(Array.from(layout(yield* Fiber.join(geometry)), (seat) => [String(seat.id), seat]))
+      yield* page.locator("path.bo").first().waitFor
+      yield* click(page, clearSpot, "h1")
+      yield* zoomToSeats(page)
+      for (const [index, seatId] of seatIds.entries()) {
+        const point = positions.get(seatId)
+        if (point === undefined) return yield* new SeatsError({ message: `seat ${seatId} is not on this event's seat map` })
+        yield* bringIntoView(page, seatId, point)
+        if ((yield* page.locator(`#s${seatId}.has-hover`).count) === 0)
+          return yield* new SeatsError({ message: `seat ${seatId} is not free any more` })
+        yield* click(page, `#s${seatId}`)
+        yield* page.locator("button.js-tooltip-go >> visible=true").first().waitFor
+        yield* click(page, "button.js-tooltip-go >> visible=true")
+        yield* page.use(`wait for ${index + 1} ticket(s) in the selection`, (raw) =>
+          raw
+            .locator(cartButton)
+            .filter({ hasText: new RegExp(`\\b${index + 1} Tickets?\\b`) })
+            .first()
+            .waitFor({ timeout: 15_000 }),
+        )
+      }
+      const cartRequest = yield* Effect.forkChild(
+        page.use("wait for the cart request", (raw) =>
+          raw
+            .waitForResponse((response) => response.request().method() === "PUT" && response.url().includes("/api/shoppingCart/"), {
+              timeout: 30_000,
+            })
+            .then((response) => response.status()),
+        ),
+      )
+      yield* Effect.yieldNow
+      yield* click(page, cartButton)
+      // A refused selection comes back as a bare 403 and the page reloads the event without a message.
+      const status = yield* Fiber.join(cartRequest)
+      if (status === 403)
+        return yield* new SeatsError({
+          message:
+            "the site refused the selection (HTTP 403), most likely because it would leave a single free seat alone in a row; choose seats that leave no single gap",
+        })
+      if (status >= 400) return yield* new SeatsError({ message: `the site refused the selection (HTTP ${status})` })
+      yield* page.use("wait for the cart", (raw) => raw.waitForURL((next) => !next.href.includes("/event/"), { timeout: 30_000 }))
+      yield* page.getByText("Shopping Cart").first().waitFor
+      const text = yield* page.locator("body").innerText
+      const start = text.indexOf("Shopping Cart")
+      const end = text.indexOf("Summary", start)
+      return { url: yield* page.url, contents: (start === -1 ? text : text.slice(start, end === -1 ? undefined : end)).trim() }
     }),
   )
 
@@ -129,4 +276,5 @@ export const eventim: SeatProvider = {
   name: "eventim (fnacspectacles.com)",
   matches: (url) => hosts.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`)),
   read,
+  addToCart,
 }

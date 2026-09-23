@@ -2,6 +2,7 @@ import { Context, Data, Effect, Layer, Schema } from "effect"
 import type { BrowserError, Page } from "./browser.ts"
 
 export const Seat = Schema.Struct({
+  id: Schema.String,
   block: Schema.String,
   row: Schema.String,
   position: Schema.Number,
@@ -12,12 +13,16 @@ export type Seat = typeof Seat.Type
 
 export const SeatsJson = Schema.fromJsonString(Schema.Array(Seat), { space: 2 })
 
+export type Cart = { readonly url: string; readonly contents: string }
+
 export class SeatsError extends Data.TaggedError("SeatsError")<{ readonly message: string }> {}
 
 export interface SeatProvider {
   readonly name: string
   readonly matches: (url: URL) => boolean
   readonly read: (url: URL) => Effect.Effect<ReadonlyArray<Seat>, BrowserError | SeatsError, Page>
+  // Stops at the cart: the seats are held for the site's reservation time and nothing is paid.
+  readonly addToCart: (url: URL, seatIds: ReadonlyArray<string>) => Effect.Effect<Cart, BrowserError | SeatsError, Page>
 }
 
 export class SeatProviders extends Context.Service<

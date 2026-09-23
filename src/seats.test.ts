@@ -6,6 +6,7 @@ const fake = (name: string, host: string): SeatProvider => ({
   name,
   matches: (url) => url.hostname === host,
   read: () => Effect.succeed([]),
+  addToCart: () => Effect.succeed({ url: "", contents: "" }),
 })
 
 const providerFor = (url: string, providers: ReadonlyArray<SeatProvider>) =>
