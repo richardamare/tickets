@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "effect": "^4.0.0-rc.117"
+    "effect": "^4.0.0-rc.117",
+    "playwright": "^1.63.0"
   },
   "devDependencies": {
     "@types/bun": "latest"
