@@ -4,9 +4,12 @@ import { runAgent } from "./agent.ts"
 import { Page } from "./browser.ts"
 import { AgentState } from "./state.ts"
 
+export const statuses = ["on_sale", "sold_out", "not_yet_on_sale", "resale_only"] as const
+export type Status = (typeof statuses)[number]
+
 export const Availability = Schema.Struct({
   event: Schema.String,
-  status: Schema.Literals(["on_sale", "sold_out", "not_yet_on_sale", "resale_only", "blocked", "unknown"]),
+  status: Schema.Literals([...statuses, "blocked", "unknown"]),
   categories: Schema.Array(
     Schema.Struct({
       name: Schema.String,
@@ -94,7 +97,15 @@ const summary = (availability: Availability) =>
     ? ` (${availability.categories.map((c) => `${c.name} ${c.status} ${c.price}`).join("; ")})`
     : "")
 
-export const watch = (urls: ReadonlyArray<string>, options: { readonly everyMinutes: number; readonly once: boolean; readonly maxSteps: number }) =>
+export const watch = (
+  urls: ReadonlyArray<string>,
+  options: {
+    readonly everyMinutes: number
+    readonly once: boolean
+    readonly maxSteps: number
+    readonly until: ReadonlyArray<Status>
+  },
+) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem
     const path = yield* Path.Path
@@ -125,10 +136,11 @@ export const watch = (urls: ReadonlyArray<string>, options: { readonly everyMinu
           yield* Console.error(`[${now}] ${url} check failed: ${outcome.reason}`)
           if (previous.failingSince === undefined) yield* notify("Ticket check failing", `${url}: ${outcome.reason}`)
           yield* save({ ...store, [url]: { ...previous, failingSince: previous.failingSince ?? now, lastFailure: outcome.reason } })
-          return false
+          return "failed" as const
         }
 
         const next = outcome.availability
+        const reached = options.until.some((status) => status === next.status)
         if (previous.lastGood === undefined) {
           yield* Console.log(`[${now}] ${url} first check: ${summary(next)}`)
         } else {
@@ -136,17 +148,29 @@ export const watch = (urls: ReadonlyArray<string>, options: { readonly everyMinu
           if (changes.length === 0) yield* Console.log(`[${now}] ${url} unchanged: ${next.status}`)
           else {
             yield* Console.log(`[${now}] ${url} CHANGED: ${changes.join("; ")}`)
-            yield* notify(`Tickets changed: ${next.event}`, changes.join("; "))
+            if (!reached) yield* notify(`Tickets changed: ${next.event}`, changes.join("; "))
           }
         }
         yield* save({ ...store, [url]: { lastGood: next, lastGoodAt: now } })
-        return true
+        if (!reached) return "checked" as const
+        yield* Console.log(`[${now}] ${url} REACHED ${next.status}, no longer watching it`)
+        yield* notify(`Tickets ${next.status}: ${next.event}`, summary(next))
+        return "reached" as const
       })
 
-    const round = Effect.forEach(urls, checkOne).pipe(Effect.map((results) => results.filter((ok) => !ok).length))
+    const watching = new Set(urls)
+    const total = watching.size
+    const round = Effect.suspend(() =>
+      Effect.forEach([...watching], (url) =>
+        checkOne(url).pipe(Effect.tap((result) => Effect.sync(() => result === "reached" && watching.delete(url)))),
+      ),
+    ).pipe(Effect.map((results) => results.filter((result) => result === "failed").length))
     if (!options.once) {
-      return yield* round.pipe(Effect.repeat(Schedule.spaced(`${options.everyMinutes} minutes`)), Effect.asVoid)
+      yield* round.pipe(
+        Effect.repeat({ schedule: Schedule.spaced(`${options.everyMinutes} minutes`), until: () => watching.size === 0 }),
+      )
+      return
     }
     const failed = yield* round
-    if (failed > 0) return yield* new WatchError({ message: `${failed} of ${urls.length} checks failed` })
+    if (failed > 0) return yield* new WatchError({ message: `${failed} of ${total} checks failed` })
   })

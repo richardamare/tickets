@@ -11,10 +11,10 @@ To run:
 ```bash
 bun run start title <url>
 bun run start agent "<task>"
-bun run start watch <event-url>... [--every 15] [--once]
+bun run start watch <event-url>... [--every 15] [--once] [--until on_sale]...
 ```
 
-`watch` has the agent read each event page's availability, every 15 minutes (at least 5), and prints plus notifies on every change. A page behind a bot check, captcha or waiting room is reported as a failed check, never as sold out; `--once` exits non-zero when any check fails. Results are kept in `~/.ticket-scraper/watch.json` (override with `WATCH_STATE_FILE`).
+`watch` has the agent read each event page's availability, every 15 minutes (at least 5), and prints plus notifies on every change. A page behind a bot check, captcha or waiting room is reported as a failed check, never as sold out; `--once` exits non-zero when any check fails. With `--until <status>` (`on_sale`, `sold_out`, `not_yet_on_sale` or `resale_only`, repeatable), each page is polled until its status is one of those, notified, and dropped; `watch` exits once every page has reached one. Results are kept in `~/.ticket-scraper/watch.json` (override with `WATCH_STATE_FILE`).
 
 Pages open in Microsoft Edge from `/Applications`, signed in through a copy of the shared devbox base profile `~/.devbox/browser/edge-base` (override with `EDGE_BASE_PROFILE`). Sign in to that profile with `devbox browser profile open` and close Edge. The first run clones it with `cp -cR` into `~/.ticket-scraper/edge-profile` (override with `EDGE_PROFILE`). Later runs reuse the copy, so a later sign-in to the base only reaches the scraper after you delete the copy. Playwright attaches to that Edge over CDP on loopback. On exit the scraper closes Edge through CDP so the profile gets saved.
 

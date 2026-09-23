@@ -6,7 +6,7 @@ import { Browser, Page } from "./browser.ts"
 import { Foundry } from "./foundry.ts"
 import { Secrets } from "./secrets.ts"
 import { AgentState } from "./state.ts"
-import { watch } from "./watch.ts"
+import { statuses, watch } from "./watch.ts"
 
 const StateJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Json))
 
@@ -57,12 +57,16 @@ const watchCommand = Command.make(
     ),
     once: Flag.Boolean("once").pipe(Flag.withDescription("Run one round of checks and exit"), Flag.withDefault(false)),
     maxSteps: Flag.Int("max-steps").pipe(Flag.withDescription("Model calls per check before giving up"), Flag.withDefault(25)),
+    until: Flag.Literals("until", statuses).pipe(
+      Flag.withDescription("Stop watching a page once its status is this one; repeat for several"),
+      Flag.atLeast(0),
+    ),
   },
-  ({ urls, every, once, maxSteps }) =>
-    watch(urls, { everyMinutes: every, once, maxSteps }).pipe(
+  ({ urls, every, once, maxSteps, until }) =>
+    watch(urls, { everyMinutes: every, once, maxSteps, until }).pipe(
       Effect.provide(Layer.mergeAll(Browser.layer, Foundry.layer, Secrets.layer)),
     ),
-).pipe(Command.withDescription("Check ticket availability on <url>... and report every change"))
+).pipe(Command.withDescription("Check ticket availability on <url>... and report every change, until each page reaches an --until status"))
 
 const scraper = Command.make("ticket-scraper").pipe(Command.withSubcommands([title, agent, watchCommand]))
 
