@@ -107,8 +107,8 @@ export class Browser extends Context.Service<
         Config.withDefault(join(homedir(), ".ticket-scraper", "edge-profile")),
       )
       yield* attempt("prepare the Edge profile", () => prepareProfile(base, profile))
-      const { cdpUrl } = yield* Effect.acquireRelease(launchEdge(profile), ({ edge, cdpUrl }) =>
-        Effect.promise(() => closeEdge(edge, cdpUrl)),
+      const { cdpUrl } = yield* Effect.acquireRelease(launchEdge(profile), ({ pid, cdpUrl }) =>
+        Effect.promise(() => closeEdge(pid, cdpUrl)),
       )
       const browser = yield* Effect.acquireRelease(
         attempt("attach to Edge", () => chromium.connectOverCDP(cdpUrl)),
@@ -118,7 +118,15 @@ export class Browser extends Context.Service<
       const context = browser.contexts()[0]
       if (!context) return yield* new BrowserError({ operation: "attach to Edge", cause: "Edge exposed no browser context" })
 
-      const newPage = Effect.acquireRelease(attempt("open page", () => context.newPage()), (page) =>
+      const cdp = yield* attempt("attach to Edge", () => browser.newBrowserCDPSession())
+      // context.newPage() brings Edge to the front; a background target leaves focus with the app in use.
+      const openInBackground = () =>
+        Promise.all([
+          context.waitForEvent("page"),
+          cdp.send("Target.createTarget", { url: "about:blank", background: true }),
+        ]).then(([page]) => page)
+
+      const newPage = Effect.acquireRelease(attempt("open page", openInBackground), (page) =>
         attempt("close page", () => page.close()).pipe(Effect.ignore({ log: "Warn" })),
       ).pipe(Effect.map(makePage))
 
@@ -127,7 +135,7 @@ export class Browser extends Context.Service<
   )
 }
 
-const edgeExecutable = "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+const edgeApp = "/Applications/Microsoft Edge.app"
 
 const exists = (file: string) =>
   lstat(file).then(
@@ -139,12 +147,15 @@ const exists = (file: string) =>
 const lockHolder = async (profile: string) => {
   const target = await readlink(join(profile, "SingletonLock")).catch(() => undefined)
   const pid = Number(target?.slice(target.lastIndexOf("-") + 1))
-  if (!Number.isInteger(pid) || pid <= 0) return undefined
+  return Number.isInteger(pid) && pid > 0 && isAlive(pid) ? pid : undefined
+}
+
+const isAlive = (pid: number) => {
   try {
     process.kill(pid, 0)
-    return pid
+    return true
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM" ? pid : undefined
+    return (error as NodeJS.ErrnoException).code === "EPERM"
   }
 }
 
@@ -169,23 +180,29 @@ const prepareProfile = async (base: string, profile: string) => {
 
 const launchEdge = (profile: string) =>
   attempt("launch Edge", async () => {
-    const edge = Bun.spawn(
-      [
-        edgeExecutable,
-        `--user-data-dir=${profile}`,
-        "--remote-debugging-address=127.0.0.1",
-        "--remote-debugging-port=0",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "about:blank",
-      ],
-      // Its own process group, so Ctrl+C reaches only this program and Edge is closed through CDP, saving the profile.
-      { stdio: ["ignore", "ignore", "ignore"], detached: true },
-    )
+    // open -g starts Edge without activating it; -n makes it a separate instance even
+    // while an everyday Edge runs. launchd owns the process, so Ctrl+C here does not kill it mid-write.
+    await Bun.$`open -g -n -a ${edgeApp} --args ${[
+      `--user-data-dir=${profile}`,
+      "--remote-debugging-address=127.0.0.1",
+      "--remote-debugging-port=0",
+      "--no-first-run",
+      "--no-default-browser-check",
+      // No window until a page is opened, since the first window would otherwise take focus.
+      "--no-startup-window",
+      // Pages stay in background tabs, which Edge would otherwise throttle or stop rendering.
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
+    ]}`.quiet()
     try {
-      return { edge, cdpUrl: await waitForCdp(edge, profile) }
+      const cdpUrl = await waitForCdp(profile)
+      const pid = await lockHolder(profile)
+      if (pid === undefined) throw new Error(`Edge exposed CDP at ${cdpUrl} but holds no lock on ${profile}`)
+      return { pid, cdpUrl }
     } catch (error) {
-      edge.kill("SIGTERM")
+      const pid = await lockHolder(profile)
+      if (pid !== undefined) process.kill(pid, "SIGTERM")
       throw error
     }
   })
@@ -194,9 +211,8 @@ const CdpTargets = Schema.fromJsonString(Schema.Array(Schema.Struct({ url: Schem
 const CdpVersion = Schema.fromJsonString(Schema.Struct({ webSocketDebuggerUrl: Schema.String }))
 const CdpCommand = Schema.fromJsonString(Schema.Struct({ id: Schema.Number, method: Schema.String }))
 
-const waitForCdp = async (edge: Bun.Subprocess, profile: string) => {
+const waitForCdp = async (profile: string) => {
   for (let attempt = 0; attempt < 40; attempt++) {
-    if (edge.exitCode !== null) throw new Error(`Edge exited with code ${edge.exitCode} before exposing CDP`)
     // With port 0, Edge picks a free port and writes it on the first line of DevToolsActivePort.
     const port = Number((await Bun.file(join(profile, "DevToolsActivePort")).text().catch(() => "")).split("\n")[0])
     if (port > 0) {
@@ -220,7 +236,7 @@ const waitForCdp = async (edge: Bun.Subprocess, profile: string) => {
 }
 
 // Browser.close lets Edge flush the profile to disk; SIGTERM is the fallback when it does not exit in time.
-const closeEdge = async (edge: Bun.Subprocess, cdpUrl: string) => {
+const closeEdge = async (pid: number, cdpUrl: string) => {
   const version = await fetch(`${cdpUrl}/json/version`)
     .then(async (response) => Schema.decodeUnknownPromise(CdpVersion)(await response.text()))
     .catch(() => undefined)
@@ -230,8 +246,8 @@ const closeEdge = async (edge: Bun.Subprocess, cdpUrl: string) => {
     socket.addEventListener("open", () => socket.send(command))
     socket.addEventListener("error", () => socket.close())
   }
-  const exited = await Promise.race([edge.exited.then(() => true), Bun.sleep(10_000).then(() => false)])
-  if (!exited) edge.kill("SIGTERM")
+  for (let attempt = 0; attempt < 100 && isAlive(pid); attempt++) await Bun.sleep(100)
+  if (isAlive(pid)) process.kill(pid, "SIGTERM")
 }
 
 export class Page extends Context.Service<Page, PageShape>()("Page") {
