@@ -10,7 +10,7 @@ import { watch } from "./watch.ts"
 
 const StateJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Json))
 
-const PageLive = Page.layer.pipe(Layer.provide(Browser.layer({ headless: false })))
+const PageLive = Page.layer.pipe(Layer.provide(Browser.layer))
 
 const title = Command.make(
   "title",
@@ -53,7 +53,7 @@ const watchCommand = Command.make(
   },
   ({ urls, every, once, maxSteps }) =>
     watch(urls, { everyMinutes: every, once, maxSteps }).pipe(
-      Effect.provide(Layer.mergeAll(Browser.layer({ headless: false }), Foundry.layer, Secrets.layer)),
+      Effect.provide(Layer.mergeAll(Browser.layer, Foundry.layer, Secrets.layer)),
     ),
 ).pipe(Command.withDescription("Check ticket availability on <url>... and report every change"))
 

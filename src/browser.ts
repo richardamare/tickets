@@ -1,5 +1,8 @@
-import { Context, Data, Effect, Layer, Option, type Scope } from "effect"
-import { chromium, type LaunchOptions, type Locator as PlaywrightLocator, type Page as PlaywrightPage } from "playwright"
+import { chmod, lstat, mkdir, readFile, readlink, rm } from "node:fs/promises"
+import { homedir } from "node:os"
+import { dirname, join } from "node:path"
+import { Config, Context, Data, Effect, Layer, Option, type Scope } from "effect"
+import { chromium, type Locator as PlaywrightLocator, type Page as PlaywrightPage } from "playwright"
 
 export class BrowserError extends Data.TaggedError("BrowserError")<{
   readonly operation: string
@@ -87,29 +90,136 @@ export class Browser extends Context.Service<
     readonly newPage: Effect.Effect<PageShape, BrowserError, Scope.Scope>
   }
 >()("Browser") {
-  static readonly layer = (options?: LaunchOptions) =>
-    Layer.effect(
-      Browser,
-      Effect.gen(function* () {
-        const browser = yield* Effect.acquireRelease(
-          attempt("launch", () =>
-            // Playwright's own signal handlers kill the browser without interrupting the program, which
-            // then runs on against a dead browser and exits 0; the Effect runtime owns signals instead.
-            chromium.launch({ handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false, ...options }),
-          ),
-          (browser) => attempt("close", () => browser.close()).pipe(Effect.ignore({ log: "Warn" })),
-        )
+  static readonly layer = Layer.effect(
+    Browser,
+    Effect.gen(function* () {
+      const base = yield* Config.String("EDGE_BASE_PROFILE").pipe(
+        Config.withDefault(join(homedir(), ".devbox", "browser", "edge-base")),
+      )
+      const profile = yield* Config.String("EDGE_PROFILE").pipe(
+        Config.withDefault(join(homedir(), ".ticket-scraper", "edge-profile")),
+      )
+      yield* attempt("prepare the Edge profile", () => prepareProfile(base, profile))
+      const { cdpUrl } = yield* Effect.acquireRelease(launchEdge(profile), ({ edge, cdpUrl }) =>
+        Effect.promise(() => closeEdge(edge, cdpUrl)),
+      )
+      const browser = yield* Effect.acquireRelease(
+        attempt("attach to Edge", () => chromium.connectOverCDP(cdpUrl)),
+        (browser) => attempt("detach from Edge", () => browser.close()).pipe(Effect.ignore({ log: "Warn" })),
+      )
+      // Only the default context carries the profile's cookies; newContext() over CDP starts signed out.
+      const context = browser.contexts()[0]
+      if (!context) return yield* new BrowserError({ operation: "attach to Edge", cause: "Edge exposed no browser context" })
 
-        const newPage = Effect.acquireRelease(attempt("open page", () => browser.newContext()), (context) =>
-          attempt("close page", () => context.close()).pipe(Effect.ignore({ log: "Warn" })),
-        ).pipe(
-          Effect.flatMap((context) => attempt("open page", () => context.newPage())),
-          Effect.map(makePage),
-        )
+      const newPage = Effect.acquireRelease(attempt("open page", () => context.newPage()), (page) =>
+        attempt("close page", () => page.close()).pipe(Effect.ignore({ log: "Warn" })),
+      ).pipe(Effect.map(makePage))
 
-        return { newPage }
-      }),
+      return { newPage }
+    }),
+  )
+}
+
+const edgeExecutable = "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+
+const exists = (file: string) =>
+  lstat(file).then(
+    () => true,
+    () => false,
+  )
+
+// Chromium's SingletonLock is a symlink to "<host>-<pid>" of the Edge that holds the profile.
+const lockHolder = async (profile: string) => {
+  const target = await readlink(join(profile, "SingletonLock")).catch(() => undefined)
+  const pid = Number(target?.slice(target.lastIndexOf("-") + 1))
+  if (!Number.isInteger(pid) || pid <= 0) return undefined
+  try {
+    process.kill(pid, 0)
+    return pid
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM" ? pid : undefined
+  }
+}
+
+const prepareProfile = async (base: string, profile: string) => {
+  if (!(await exists(profile))) {
+    if (!(await exists(join(base, "Default", "Preferences"))) || (await exists(join(base, "SingletonLock")))) {
+      throw new Error(
+        `the base profile ${base} is not ready; sign in with \`devbox browser profile open\`, close that Edge window, then retry`,
+      )
+    }
+    await mkdir(dirname(profile), { recursive: true })
+    await Bun.$`cp -cR ${base} ${profile}`.quiet()
+  }
+  await chmod(profile, 0o700)
+  const holder = await lockHolder(profile)
+  if (holder !== undefined) throw new Error(`Edge (pid ${holder}) is already running on ${profile}`)
+  // A copied or crashed profile keeps these, and Edge would otherwise hand off to an instance that no longer exists.
+  for (const name of ["SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"]) {
+    await rm(join(profile, name), { force: true })
+  }
+}
+
+const launchEdge = (profile: string) =>
+  attempt("launch Edge", async () => {
+    const edge = Bun.spawn(
+      [
+        edgeExecutable,
+        `--user-data-dir=${profile}`,
+        "--remote-debugging-address=127.0.0.1",
+        "--remote-debugging-port=0",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "about:blank",
+      ],
+      // Its own process group, so Ctrl+C reaches only this program and Edge is closed through CDP, saving the profile.
+      { stdio: ["ignore", "ignore", "ignore"], detached: true },
     )
+    try {
+      return { edge, cdpUrl: await waitForCdp(edge, profile) }
+    } catch (error) {
+      edge.kill("SIGTERM")
+      throw error
+    }
+  })
+
+const waitForCdp = async (edge: Bun.Subprocess, profile: string) => {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    if (edge.exitCode !== null) throw new Error(`Edge exited with code ${edge.exitCode} before exposing CDP`)
+    // With port 0, Edge picks a free port and writes it on the first line of DevToolsActivePort.
+    const port = Number((await readFile(join(profile, "DevToolsActivePort"), "utf8").catch(() => "")).split("\n")[0])
+    if (port > 0) {
+      const cdpUrl = `http://127.0.0.1:${port}`
+      const targets = await fetch(`${cdpUrl}/json/list`).then(
+        (response) => (response.ok ? (response.json() as Promise<ReadonlyArray<{ url: string }>>) : undefined),
+        () => undefined,
+      )
+      if (targets) {
+        if (targets.some((target) => target.url.startsWith("edge://force-signin"))) {
+          throw new Error(
+            `Edge asks for an interactive sign-in, so the base profile's sign-in did not carry over; sign in to the base profile, close it, delete ${profile} and retry`,
+          )
+        }
+        return cdpUrl
+      }
+    }
+    await Bun.sleep(250)
+  }
+  throw new Error("Edge did not expose its CDP endpoint within 10 seconds")
+}
+
+// Browser.close lets Edge flush the profile to disk; SIGTERM is the fallback when it does not exit in time.
+const closeEdge = async (edge: Bun.Subprocess, cdpUrl: string) => {
+  const version = await fetch(`${cdpUrl}/json/version`)
+    .then((response) => response.json() as Promise<{ webSocketDebuggerUrl: string }>)
+    .catch(() => undefined)
+  if (version) {
+    const socket = new WebSocket(version.webSocketDebuggerUrl)
+    socket.addEventListener("open", () => socket.send(JSON.stringify({ id: 1, method: "Browser.close" })))
+    socket.addEventListener("error", () => socket.close())
+  }
+  const exited = await Promise.race([edge.exited.then(() => true), Bun.sleep(10_000).then(() => false)])
+  if (!exited) edge.kill("SIGTERM")
 }
 
 export class Page extends Context.Service<Page, PageShape>()("Page") {
