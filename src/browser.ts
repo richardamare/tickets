@@ -16,14 +16,14 @@ const attempt = <A>(operation: string, f: () => Promise<A>) =>
 type RoleOptions = Parameters<PlaywrightPage["getByRole"]>[1]
 type TextOptions = Parameters<PlaywrightPage["getByText"]>[1]
 
-export interface Locator {
+export interface LocatorShape {
   readonly raw: PlaywrightLocator
-  readonly locator: (selector: string) => Locator
-  readonly getByRole: (role: Parameters<PlaywrightPage["getByRole"]>[0], options?: RoleOptions) => Locator
-  readonly getByText: (text: string | RegExp, options?: TextOptions) => Locator
-  readonly first: () => Locator
-  readonly nth: (index: number) => Locator
-  readonly all: Effect.Effect<ReadonlyArray<Locator>, BrowserError>
+  readonly locator: (selector: string) => LocatorShape
+  readonly getByRole: (role: Parameters<PlaywrightPage["getByRole"]>[0], options?: RoleOptions) => LocatorShape
+  readonly getByText: (text: string | RegExp, options?: TextOptions) => LocatorShape
+  readonly first: () => LocatorShape
+  readonly nth: (index: number) => LocatorShape
+  readonly all: Effect.Effect<ReadonlyArray<LocatorShape>, BrowserError>
   readonly count: Effect.Effect<number, BrowserError>
   readonly click: Effect.Effect<void, BrowserError>
   readonly fill: (value: string) => Effect.Effect<void, BrowserError>
@@ -34,7 +34,7 @@ export interface Locator {
   readonly waitFor: Effect.Effect<void, BrowserError>
 }
 
-const makeLocator = (raw: PlaywrightLocator): Locator => ({
+const makeLocator = (raw: PlaywrightLocator): LocatorShape => ({
   raw,
   locator: (selector) => makeLocator(raw.locator(selector)),
   getByRole: (role, options) => makeLocator(raw.getByRole(role, options)),
@@ -53,20 +53,20 @@ const makeLocator = (raw: PlaywrightLocator): Locator => ({
   waitFor: attempt(`wait for ${raw}`, () => raw.waitFor()),
 })
 
-export interface Page {
+export interface PageShape {
   readonly raw: PlaywrightPage
   readonly goto: (url: string) => Effect.Effect<void, BrowserError>
   readonly url: Effect.Effect<string>
   readonly title: Effect.Effect<string, BrowserError>
   readonly content: Effect.Effect<string, BrowserError>
-  readonly locator: (selector: string) => Locator
-  readonly getByRole: (role: Parameters<PlaywrightPage["getByRole"]>[0], options?: RoleOptions) => Locator
-  readonly getByText: (text: string | RegExp, options?: TextOptions) => Locator
+  readonly locator: (selector: string) => LocatorShape
+  readonly getByRole: (role: Parameters<PlaywrightPage["getByRole"]>[0], options?: RoleOptions) => LocatorShape
+  readonly getByText: (text: string | RegExp, options?: TextOptions) => LocatorShape
   readonly screenshot: (path: string) => Effect.Effect<void, BrowserError>
   readonly use: <A>(operation: string, f: (page: PlaywrightPage) => Promise<A>) => Effect.Effect<A, BrowserError>
 }
 
-const makePage = (raw: PlaywrightPage): Page => ({
+const makePage = (raw: PlaywrightPage): PageShape => ({
   raw,
   goto: (url) => attempt(`load ${url}`, () => raw.goto(url)),
   url: Effect.sync(() => raw.url()),
@@ -82,7 +82,7 @@ const makePage = (raw: PlaywrightPage): Page => ({
 export class Browser extends Context.Service<
   Browser,
   {
-    readonly newPage: Effect.Effect<Page, BrowserError, Scope.Scope>
+    readonly newPage: Effect.Effect<PageShape, BrowserError, Scope.Scope>
   }
 >()("Browser") {
   static readonly layer = (options?: LaunchOptions) =>
@@ -108,4 +108,15 @@ export class Browser extends Context.Service<
         return { newPage }
       }),
     )
+}
+
+export class Page extends Context.Service<Page, PageShape>()("Page") {
+  static readonly layer = Layer.effect(Page, Browser.use((browser) => browser.newPage))
+}
+
+export class Locator extends Context.Service<Locator, LocatorShape>()("Locator") {
+  static readonly at =
+    (selector: string) =>
+    <A, E, R>(self: Effect.Effect<A, E, R>) =>
+      Effect.provideServiceEffect(self, Locator, Page.useSync((page) => page.locator(selector)))
 }
