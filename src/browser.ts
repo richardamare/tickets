@@ -10,7 +10,7 @@ export class BrowserError extends Data.TaggedError("BrowserError")<{
   }
 }
 
-const attempt = <A>(operation: string, f: () => Promise<A>) =>
+export const attempt = <A>(operation: string, f: () => Promise<A>) =>
   Effect.tryPromise({ try: f, catch: (cause) => new BrowserError({ operation, cause }) })
 
 export class Browser extends Context.Service<
