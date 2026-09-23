@@ -1,5 +1,5 @@
-import { Console, Data, Effect, Option, Redacted, Schema } from "effect"
-import type { FunctionTool, ResponseFunctionToolCall, ResponseInputItem } from "openai/resources/responses/responses"
+import { Data, Effect, Option, Redacted, Schema } from "effect"
+import type { FunctionTool, Response, ResponseFunctionToolCall, ResponseInputItem, ResponseReasoningItem } from "openai/resources/responses/responses"
 import { BrowserError, Locator, Page } from "./browser.ts"
 import { Foundry } from "./foundry.ts"
 import { describeSeats, type Seat, SeatProviders, type SeatsError } from "./seats.ts"
@@ -311,23 +311,50 @@ const runToolCall = (call: ResponseFunctionToolCall) => {
   return found ? found.run(call.arguments) : Effect.fail(`Unknown tool ${call.name}`)
 }
 
+const preview = (text: string) => {
+  const flat = text.replaceAll("\n", " ")
+  return flat.length > 300 ? `${flat.slice(0, 300)}… (${text.length} characters)` : flat
+}
+
+const logResponse = (response: Response) =>
+  Effect.gen(function* () {
+    for (const item of response.output) {
+      if (item.type === "reasoning")
+        for (const part of (item as ResponseReasoningItem).summary) yield* Effect.logInfo(`Agent thinks: ${part.text}`)
+      if (item.type === "message")
+        for (const part of item.content) if (part.type === "output_text" && part.text.trim()) yield* Effect.logInfo(`Agent says: ${part.text}`)
+    }
+    const usage = response.usage
+    if (usage)
+      yield* Effect.logDebug(
+        `Model used ${usage.input_tokens} input (${usage.input_tokens_details.cached_tokens} cached), ${usage.output_tokens} output (${usage.output_tokens_details.reasoning_tokens} reasoning) tokens`,
+      )
+  })
+
 export const runAgent = (task: string, options: { readonly maxSteps: number }) =>
   Effect.gen(function* () {
     const foundry = yield* Foundry
     const trace: Array<ToolEvent> = []
-    const stop = (reason: AgentError["reason"], detail: string) => new AgentError({ reason, detail, trace })
+    const stop = (reason: AgentError["reason"], detail: string) =>
+      Effect.logWarning(`Agent stopped (${reason}): ${detail}`).pipe(Effect.as(new AgentError({ reason, detail, trace })), Effect.flatMap(Effect.fail))
 
     let input: string | Array<ResponseInputItem> = task
     let previousResponseId: string | undefined
+    yield* Effect.logInfo(`Agent task: ${task}`)
 
     for (let step = 1; step <= options.maxSteps; step++) {
-      const response = yield* foundry.respond({
-        instructions,
-        input,
-        tools: tools.map((t) => t.definition),
-        parallel_tool_calls: false,
-        ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
-      })
+      const response = yield* foundry
+        .respond({
+          instructions,
+          input,
+          tools: tools.map((t) => t.definition),
+          parallel_tool_calls: false,
+          // Asks for a summary of the model's reasoning so the log shows why it acts, not only what it does.
+          reasoning: { summary: "auto" },
+          ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
+        })
+        .pipe(Effect.withLogSpan("model"), Effect.annotateLogs("step", step))
+      yield* logResponse(response).pipe(Effect.annotateLogs("step", step))
 
       if (response.status === "incomplete") {
         const reason = response.incomplete_details?.reason
@@ -343,16 +370,24 @@ export const runAgent = (task: string, options: { readonly maxSteps: number }) =
       if (calls.length === 0) {
         const answer = response.output_text.trim()
         if (!answer) return yield* stop("empty-answer", "the model finished without text or tool calls")
+        yield* Effect.logInfo(`Agent answered after ${step} model calls`)
         return { answer, trace, steps: step, state: yield* AgentState.use((state) => state.snapshot) }
       }
 
       const outputs: Array<ResponseInputItem> = []
       for (const call of calls) {
-        const outcome = yield* Effect.result(runToolCall(call))
+        const outcome = yield* Effect.gen(function* () {
+          yield* Effect.logInfo(`Agent calls ${call.name}(${call.arguments})`)
+          const outcome = yield* Effect.result(runToolCall(call))
+          if (outcome._tag === "Success") {
+            yield* Effect.logInfo(`${call.name} returned: ${preview(outcome.success)}`)
+            yield* Effect.logDebug(`${call.name} full output:\n${outcome.success}`)
+          } else yield* Effect.logWarning(`${call.name} failed: ${outcome.failure}`)
+          return outcome
+        }).pipe(Effect.withLogSpan(call.name), Effect.annotateLogs({ step, tool: call.name }))
         const ok = outcome._tag === "Success"
         const output = ok ? outcome.success : `Error: ${outcome.failure}`
         trace.push({ step, tool: call.name, args: call.arguments, ok, output })
-        yield* Console.error(`[step ${step}] ${call.name}(${call.arguments}) ${ok ? "ok" : "failed"}: ${output.slice(0, 160).replaceAll("\n", " ")}`)
         outputs.push({ type: "function_call_output", call_id: call.call_id, output })
       }
       input = outputs

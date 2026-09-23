@@ -126,7 +126,11 @@ const removePopups = (page: PageShape) =>
 const click = (page: PageShape, selector: string, clear = clearSpot) => {
   const once = removePopups(page).pipe(Effect.andThen(page.locator(selector).first().mouseClick))
   return once.pipe(
-    Effect.tapError(() => page.locator(clear).first().mouseClick.pipe(Effect.ignore)),
+    Effect.tapError((error) =>
+      Effect.logWarning(`Click on ${selector} did not land (${error.message}); clicking ${clear} to clear the way`).pipe(
+        Effect.andThen(page.locator(clear).first().mouseClick.pipe(Effect.ignore)),
+      ),
+    ),
     Effect.retry({ times: 2 }),
   )
 }
@@ -142,6 +146,7 @@ const declineConsent = (page: PageShape) =>
       ),
     )
     if (!shown) return
+    yield* Effect.logInfo("Declining the cookie consent banner")
     yield* page.locator(decline).first().mouseClick
   })
 
@@ -164,9 +169,12 @@ const read = (url: URL) =>
         ),
       )
       yield* Effect.yieldNow
+      yield* Effect.logInfo("Opening the seating chart")
       yield* click(page, seatingChart, "h1")
       const [seatmap, mapping, availability] = yield* Fiber.join(responses)
-      return decodeSeatmap(seatmap, mapping, availability)
+      const seats = decodeSeatmap(seatmap, mapping, availability)
+      yield* Effect.logInfo(`Read ${seats.length} seats from the Eventim seat map, ${seats.filter((seat) => seat.available).length} free`)
+      return seats
     }),
   )
 
@@ -174,7 +182,9 @@ const read = (url: URL) =>
 const zoomToSeats = (page: PageShape) =>
   Effect.gen(function* () {
     for (let level = 0; level < 8; level++) {
-      if ((yield* page.locator("g.seats circle.s").count) > 0) return
+      const drawn = yield* page.locator("g.seats circle.s").count
+      if (drawn > 0) return yield* Effect.logInfo(`The map draws ${drawn} single seats after zooming in ${level} times`)
+      yield* Effect.logDebug(`Zooming in (level ${level + 1})`)
       yield* click(page, ".seatmap-tab .js-zoom-in")
       yield* Effect.sleep("1500 millis")
     }
@@ -206,6 +216,7 @@ const bringIntoView = (page: PageShape, seatId: string, point: { readonly x: num
         yield* page.locator(`#s${seatId}`).first().waitFor
         return
       }
+      yield* Effect.logDebug(`Seat ${seatId} is outside the view; dragging the map`)
       yield* page.locator(".js-seatmap-view").mouseDrag(offset)
       yield* Effect.sleep("500 millis")
     }
@@ -216,9 +227,11 @@ const addToCart = (url: URL, seatIds: ReadonlyArray<string>) =>
   Page.use((page) =>
     Effect.gen(function* () {
       if (seatIds.length === 0) return yield* new SeatsError({ message: "no seats given" })
+      yield* Effect.logInfo(`Adding ${seatIds.length} seat(s) to the cart: ${seatIds.join(", ")}`)
       yield* openSeatingChart(page, url)
       const geometry = yield* Effect.forkChild(response(page, "seatmap", SeatmapJson))
       yield* Effect.yieldNow
+      yield* Effect.logInfo("Opening the seating chart")
       yield* click(page, seatingChart, "h1")
       const positions = new Map(Array.from(layout(yield* Fiber.join(geometry)), (seat) => [String(seat.id), seat]))
       yield* page.locator("path.bo").first().waitFor
@@ -232,6 +245,8 @@ const addToCart = (url: URL, seatIds: ReadonlyArray<string>) =>
           return yield* new SeatsError({ message: `seat ${seatId} is not free any more` })
         yield* click(page, `#s${seatId}`)
         yield* page.locator("button.js-tooltip-go >> visible=true").first().waitFor
+        const label = yield* page.locator(".tooltipster-base").first().innerText
+        yield* Effect.logInfo(`Selected seat ${seatId}: ${label.replace(/\s+/g, " ").replace(/ Continue$/, "")}`)
         yield* click(page, "button.js-tooltip-go >> visible=true")
         yield* page.use(`wait for ${index + 1} ticket(s) in the selection`, (raw) =>
           raw
@@ -241,6 +256,7 @@ const addToCart = (url: URL, seatIds: ReadonlyArray<string>) =>
             .waitFor({ timeout: 15_000 }),
         )
       }
+      yield* Effect.logInfo("Going to the cart")
       const cartRequest = yield* Effect.forkChild(
         page.use("wait for the cart request", (raw) =>
           raw
@@ -262,6 +278,7 @@ const addToCart = (url: URL, seatIds: ReadonlyArray<string>) =>
       if (status >= 400) return yield* new SeatsError({ message: `the site refused the selection (HTTP ${status})` })
       yield* page.use("wait for the cart", (raw) => raw.waitForURL((next) => !next.href.includes("/event/"), { timeout: 30_000 }))
       yield* page.getByText("Shopping Cart").first().waitFor
+      yield* Effect.logInfo(`Seats are in the cart at ${yield* page.url}`)
       const text = yield* page.locator("body").innerText
       const start = text.indexOf("Shopping Cart")
       const end = text.indexOf("Summary", start)

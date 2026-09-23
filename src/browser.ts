@@ -116,8 +116,11 @@ const makeLocator = (raw: PlaywrightLocator): LocatorShape => ({
   nth: (index) => makeLocator(raw.nth(index)),
   all: attempt(`list ${raw}`, () => raw.all()).pipe(Effect.map((locators) => locators.map(makeLocator))),
   count: attempt(`count ${raw}`, () => raw.count()),
-  mouseClick: attempt(`mouse-click ${raw}`, () => mouseClick(raw)),
-  mouseDrag: (by) => attempt(`mouse-drag ${raw}`, () => mouseDrag(raw, by)),
+  mouseClick: Effect.logDebug(`Mouse click on ${raw}`).pipe(Effect.andThen(attempt(`mouse-click ${raw}`, () => mouseClick(raw)))),
+  mouseDrag: (by) =>
+    Effect.logDebug(`Mouse drag on ${raw} by ${Math.round(by.x)},${Math.round(by.y)}`).pipe(
+      Effect.andThen(attempt(`mouse-drag ${raw}`, () => mouseDrag(raw, by))),
+    ),
   fill: (value) => attempt(`fill ${raw}`, () => raw.fill(value)),
   innerText: attempt(`read text of ${raw}`, () => raw.innerText()),
   allInnerTexts: attempt(`read texts of ${raw}`, () => raw.allInnerTexts()),
@@ -144,7 +147,12 @@ export interface PageShape {
 
 const makePage = (raw: PlaywrightPage): PageShape => ({
   raw,
-  goto: (url) => attempt(`load ${url}`, () => raw.goto(url)),
+  goto: (url) =>
+    Effect.logInfo(`Loading ${url}`).pipe(
+      Effect.andThen(attempt(`load ${url}`, () => raw.goto(url))),
+      Effect.andThen(Effect.logDebug(`Loaded ${raw.url()}`)),
+      Effect.withLogSpan("load"),
+    ),
   url: Effect.sync(() => raw.url()),
   title: attempt("read title", () => raw.title()),
   content: attempt("read content", () => raw.content()),
@@ -175,12 +183,21 @@ export class Browser extends Context.Service<
       const profile = yield* Config.String("EDGE_PROFILE").pipe(
         Config.withDefault(join(homedir(), ".ticket-scraper", "edge-profile")),
       )
-      yield* attempt("prepare the Edge profile", () => prepareProfile(base, profile))
-      const { cdpUrl } = yield* Effect.acquireRelease(launchEdge(profile), ({ pid, cdpUrl }) =>
-        Effect.promise(() => closeEdge(pid, cdpUrl)),
+      const cloned = yield* attempt("prepare the Edge profile", () => prepareProfile(base, profile))
+      yield* Effect.logInfo(cloned ? `Cloned the Edge base profile ${base} into ${profile}` : `Using the Edge profile ${profile}`)
+      const { cdpUrl } = yield* Effect.acquireRelease(
+        launchEdge(profile).pipe(
+          Effect.tap(({ pid, cdpUrl }) => Effect.logInfo(`Edge started in the background (pid ${pid}, CDP ${cdpUrl})`)),
+          Effect.withLogSpan("launch"),
+        ),
+        ({ pid, cdpUrl }) =>
+          Effect.logInfo(`Closing Edge (pid ${pid})`).pipe(
+            Effect.andThen(Effect.promise(() => closeEdge(pid, cdpUrl))),
+            Effect.andThen(Effect.logDebug("Edge closed")),
+          ),
       )
       const browser = yield* Effect.acquireRelease(
-        attempt("attach to Edge", () => chromium.connectOverCDP(cdpUrl)),
+        attempt("attach to Edge", () => chromium.connectOverCDP(cdpUrl)).pipe(Effect.tap(Effect.logDebug("Playwright attached over CDP"))),
         (browser) => attempt("detach from Edge", () => browser.close()).pipe(Effect.ignore({ log: "Warn" })),
       )
       // Only the default context carries the profile's cookies; newContext() over CDP starts signed out.
@@ -195,8 +212,10 @@ export class Browser extends Context.Service<
           cdp.send("Target.createTarget", { url: "about:blank", background: true }),
         ]).then(([page]) => page)
 
-      const newPage = Effect.acquireRelease(attempt("open page", openInBackground), (page) =>
-        attempt("close page", () => page.close()).pipe(Effect.ignore({ log: "Warn" })),
+      const newPage = Effect.acquireRelease(
+        attempt("open page", openInBackground).pipe(Effect.tap(Effect.logDebug("Opened a background tab"))),
+        (page) =>
+          attempt("close page", () => page.close()).pipe(Effect.ignore({ log: "Warn" }), Effect.andThen(Effect.logDebug("Closed the tab"))),
       ).pipe(Effect.map(makePage))
 
       return { newPage }
@@ -229,7 +248,8 @@ const isAlive = (pid: number) => {
 }
 
 const prepareProfile = async (base: string, profile: string) => {
-  if (!(await exists(profile))) {
+  const cloned = !(await exists(profile))
+  if (cloned) {
     if (!(await exists(join(base, "Default", "Preferences"))) || (await lockHolder(base)) !== undefined) {
       throw new Error(
         `the base profile ${base} is not ready; sign in with \`devbox browser profile open\`, close that Edge window, then retry`,
@@ -245,6 +265,7 @@ const prepareProfile = async (base: string, profile: string) => {
   for (const name of ["SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"]) {
     await rm(join(profile, name), { force: true })
   }
+  return cloned
 }
 
 const launchEdge = (profile: string) =>
