@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { decodeSeatmap, eventim } from "./eventim.ts"
+import { decodeSeatmap, eventIdOf, eventim, freeTickets } from "./eventim.ts"
 
 test("seat ids, positions, categories and availability are decoded from their deltas", () => {
   const seats = decodeSeatmap(
@@ -55,4 +55,41 @@ test("eventim handles Fnac Spectacles pages and nothing else", () => {
   expect(eventim.matches(new URL("https://fnacspectacles.com/event/1/"))).toBe(true)
   expect(eventim.matches(new URL("https://www.ticketmaster.fr/event/1"))).toBe(false)
   expect(eventim.matches(new URL("https://notfnacspectacles.com/"))).toBe(false)
+})
+
+test("free tickets are counted per category from seats and standing areas, leaving out categories with none", () => {
+  const free = freeTickets(
+    {
+      priceCategories: [
+        { id: 7, name: "Cat 1" },
+        { id: 9, name: "Cat 2" },
+        { id: 11, name: "Fosse" },
+      ],
+      seats: [
+        [100, 0, 7],
+        [1, 0, 0],
+        [100, 0, 2],
+      ],
+      generalAdmissions: [[3640, 0, 11, [0]]],
+    },
+    {
+      seats: [
+        [100, 1],
+        [1, 1],
+        [100, 0],
+      ],
+      generalAdmissions: [[3640, 545, [[0, 545, 0]]]],
+    },
+  )
+
+  expect([...free]).toEqual([
+    ["Cat 1", 2],
+    ["Fosse", 545],
+  ])
+})
+
+test("the event id is the number at the end of the event page path", () => {
+  expect(eventIdOf(new URL("https://www.fnacspectacles.com/event/benjamin-biolay-en-tournee-zenith-paris-la-villette-20811075/"))).toBe("20811075")
+  expect(eventIdOf(new URL("https://www.fnacspectacles.com/en/event/le-roi-lion-21844084"))).toBe("21844084")
+  expect(eventIdOf(new URL("https://www.fnacspectacles.com/artist/benjamin-biolay/"))).toBeUndefined()
 })

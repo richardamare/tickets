@@ -1,4 +1,5 @@
 import { Effect, Fiber, Schema } from "effect"
+import { HttpClient } from "effect/unstable/http"
 import { Page, type PageShape } from "../browser.ts"
 import { type Seat, type SeatProvider, SeatsError } from "../seats.ts"
 
@@ -22,14 +23,51 @@ export const SeatmapJson = Schema.Struct({
   ),
 })
 
+// Standing areas hold absolute values, unlike the seat lists: [area id, ?, price category id, …] in the
+// mapping and [area id, free tickets, …] in the availability.
 export const MappingJson = Schema.Struct({
   priceCategories: Schema.Array(Schema.Struct({ id: Schema.Number, name: Schema.String })),
   seats: Schema.Array(SeatDelta),
+  generalAdmissions: Schema.optionalKey(
+    Schema.Array(Schema.TupleWithRest(Schema.Tuple([Schema.Number, Schema.Number, Schema.Number]), [Schema.Unknown])),
+  ),
 })
 
 export const AvailabilityJson = Schema.Struct({
   seats: Schema.Array(Schema.Tuple([Schema.Number, Schema.Number])),
+  generalAdmissions: Schema.optionalKey(
+    Schema.Array(Schema.TupleWithRest(Schema.Tuple([Schema.Number, Schema.Number]), [Schema.Unknown])),
+  ),
 })
+
+// Free tickets per price category name, seated and standing together; categories with none are left out.
+export const freeTickets = (
+  mapping: typeof MappingJson.Type,
+  availability: typeof AvailabilityJson.Type,
+): ReadonlyMap<string, number> => {
+  const categoryNames = new Map(mapping.priceCategories.map((category) => [category.id, category.name]))
+  const free = new Map<string, number>()
+  const add = (categoryId: number | undefined, count: number) => {
+    const name = categoryId === undefined ? undefined : categoryNames.get(categoryId)
+    if (name !== undefined && count > 0) free.set(name, (free.get(name) ?? 0) + count)
+  }
+  const categoryOf = new Map<number, number>()
+  let id = 0
+  let category = 0
+  for (const [idDelta, , categoryDelta] of mapping.seats) {
+    id += idDelta
+    category += categoryDelta
+    categoryOf.set(id, category)
+  }
+  id = 0
+  for (const [idDelta, state] of availability.seats) {
+    id += idDelta
+    if (state === 1) add(categoryOf.get(id), 1)
+  }
+  const areaCategory = new Map((mapping.generalAdmissions ?? []).map(([area, , categoryId]) => [area, categoryId]))
+  for (const [area, count] of availability.generalAdmissions ?? []) add(areaCategory.get(area), count)
+  return free
+}
 
 export const decodeSeatmap = (
   seatmap: typeof SeatmapJson.Type,
@@ -150,9 +188,16 @@ const declineConsent = (page: PageShape) =>
     yield* page.locator(decline).first().mouseClick
   })
 
+// The site keeps the language for the session, cart and checkout included, and the selectors expect English.
+const inEnglish = (url: URL) => {
+  const english = new URL(url)
+  english.searchParams.set("language", "en")
+  return english.href
+}
+
 const openSeatingChart = (page: PageShape, url: URL) =>
   Effect.gen(function* () {
-    yield* page.goto(url.href)
+    yield* page.goto(inEnglish(url))
     yield* declineConsent(page)
     if ((yield* page.locator(seatingChart).count) === 0) return yield* new SeatsError({ message: `${url} offers no seating chart; pass the event page, …/event/…` })
   })
@@ -283,6 +328,129 @@ const addToCart = (url: URL, seatIds: ReadonlyArray<string>) =>
       const start = text.indexOf("Shopping Cart")
       const end = text.indexOf("Summary", start)
       return { url: yield* page.url, contents: (start === -1 ? text : text.slice(start, end === -1 ? undefined : end)).trim() }
+    }),
+  )
+
+export const eventIdOf = (url: URL) => url.pathname.match(/-(\d+)\/?$/)?.[1]
+
+// The site signs these URLs with a timestamp and a signature, but the API answers without them.
+const seatmapUrl = (kind: "mapping" | "availability", eventId: string) =>
+  `https://public-api.eventim.com/seatmap/api/public/${kind}/web-20-${eventId}?a_systemId=3&a_promotionId=0&a_sessionId=FS8_NO_SESSION`
+
+const ApiErrorJson = Schema.fromJsonString(Schema.Struct({ errorCode: Schema.String }))
+
+export type ApiResult<A> = { readonly _tag: "Ok"; readonly value: A } | { readonly _tag: "NoSeatmap" }
+
+// Plain HTTP without the browser: each answer is well under a kilobyte.
+const seatmapApi = <S extends Schema.Top>(kind: "mapping" | "availability", eventId: string, schema: S) =>
+  Effect.gen(function* () {
+    const { status, text } = yield* HttpClient.get(seatmapUrl(kind, eventId), {
+      headers: { accept: "application/json", "user-agent": "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/130 Safari/537.36" },
+    }).pipe(
+      Effect.flatMap((response) => Effect.map(response.text, (text) => ({ status: response.status, text }))),
+      Effect.mapError((error) => new SeatsError({ message: `Eventim's ${kind} API did not answer: ${error.message}` })),
+    )
+    if (status === 200) {
+      const value = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(schema))(text).pipe(
+        Effect.mapError((error) => new SeatsError({ message: `Eventim's ${kind} API answered with an unexpected shape: ${error.message}` })),
+      )
+      return { _tag: "Ok", value } as ApiResult<S["Type"]>
+    }
+    // A sold-out event, or one sold without a seat map, has no seat map to serve.
+    const code = yield* Schema.decodeUnknownEffect(ApiErrorJson)(text).pipe(Effect.option)
+    if (status === 400 && code._tag === "Some" && code.value.errorCode === "400-SMS-061") return { _tag: "NoSeatmap" } as ApiResult<S["Type"]>
+    return yield* new SeatsError({ message: `Eventim's ${kind} API answered HTTP ${status}: ${text.replace(/\s+/g, " ").slice(0, 160)}` })
+  })
+
+export const readMapping = (eventId: string) => seatmapApi("mapping", eventId, MappingJson)
+export const readAvailability = (eventId: string) => seatmapApi("availability", eventId, AvailabilityJson)
+
+// For events without a seat map: the event page fetched from inside the open tab, which carries the browser's
+// bot-check cookies that plain HTTP lacks. Only a category that can be bought draws a cart button.
+export const pageOffersTickets = (page: PageShape, url: URL) =>
+  Effect.gen(function* () {
+    const { status, text } = yield* page.use("fetch the event page", (raw) =>
+      raw.evaluate(async (href) => {
+        const response = await fetch(href, { credentials: "include", cache: "no-store" })
+        return { status: response.status, text: await response.text() }
+      }, inEnglish(url)),
+    )
+    if (status !== 200 || text.includes("sec-if-cpt-container"))
+      return yield* new SeatsError({ message: `the event page answered HTTP ${status}${status === 200 ? " with a bot check" : ""}` })
+    return text.includes('data-qa="add-to-shopping-cart"')
+  })
+
+export const openEventPage = (page: PageShape, url: URL) =>
+  Effect.gen(function* () {
+    yield* page.goto(inEnglish(url))
+    yield* declineConsent(page)
+  })
+
+type Category = { readonly index: number; readonly name: string; readonly typeIndex: number; readonly max: number }
+
+const categoryForm = (index: number) => `[data-qa="price-category"] form >> nth=${index}`
+
+// The ticket list beside the seat map sells the best seats left in a category, so no seat needs choosing.
+export const addBestToCart = (url: URL, quantity: number, free: ReadonlyMap<string, number>) =>
+  Page.use((page) =>
+    Effect.gen(function* () {
+      yield* openEventPage(page, url)
+      const listed = yield* page.use("wait for the ticket categories", (raw) =>
+        raw.locator('[data-qa="price-category"]').first().waitFor({ timeout: 20_000 }).then(
+          () => true,
+          () => false,
+        ),
+      )
+      if (!listed) return yield* new SeatsError({ message: "the event page lists no ticket category for sale" })
+      const categories = yield* page.use("read the ticket categories", (raw) =>
+        raw.locator('[data-qa="price-category"] form').evaluateAll((forms): Array<Category> =>
+          forms.map((form, index) => {
+            const types = Array.from(form.querySelectorAll(".js-ticket-type-item"), (type) => type as typeof form)
+            const buyable = (type: typeof form) => type.querySelector('[data-qa="more-tickets"]:not([disabled]):not(.disabled)') !== null
+            // A marketing label marks a reduced rate, such as for members, that needs proof at the door.
+            let typeIndex = types.findIndex((type) => !type.getAttribute("data-marketing-label-id") && buyable(type))
+            if (typeIndex === -1) typeIndex = types.findIndex(buyable)
+            const max = Number(types[typeIndex]?.querySelector(".js-stepper")?.getAttribute("data-max") ?? 0)
+            return { index, name: (form.getAttribute("data-qa") ?? "").replace(/^pc-list-number-/, ""), typeIndex, max }
+          }),
+        ),
+      )
+      const candidates = categories
+        .filter((category) => category.typeIndex !== -1 && category.max > 0)
+        .sort((a, b) => (free.get(b.name) ?? 0) - (free.get(a.name) ?? 0))
+      if (candidates.length === 0) return yield* new SeatsError({ message: "no ticket category on the page can be bought" })
+
+      const failures: Array<string> = []
+      for (const category of candidates) {
+        const known = free.get(category.name)
+        const wanted = Math.max(1, Math.min(quantity, category.max, known ?? quantity))
+        const type = `${categoryForm(category.index)} >> .js-ticket-type-item >> nth=${category.typeIndex}`
+        const attempt = Effect.gen(function* () {
+          yield* Effect.logInfo(`Choosing ${wanted} ticket(s) in ${category.name}`)
+          for (let count = 0; count < wanted; count++) yield* click(page, `${type} >> [data-qa="more-tickets"]`, "h1")
+          const chosen = Number(yield* page.locator(`${type} >> .js-stepper-amount-text`).first().innerText)
+          if (!(chosen > 0)) return yield* new SeatsError({ message: `${category.name}: the stepper stayed at ${chosen}` })
+          yield* Effect.logInfo(`Adding ${chosen} ticket(s) in ${category.name} to the cart`)
+          // The form posts to the cart; a refused selection lands back on the event page instead.
+          const landed = yield* Effect.forkChild(
+            page.use("wait for the cart", (raw) => raw.waitForEvent("load", { timeout: 30_000 }).then(() => raw.url())),
+          )
+          yield* Effect.yieldNow
+          yield* click(page, `${categoryForm(category.index)} >> [data-qa="add-to-shopping-cart"]`, "h1")
+          if (new URL(yield* Fiber.join(landed)).pathname.includes("/event/"))
+            return yield* new SeatsError({ message: "the site sent the selection back to the event page" })
+          return { url: yield* page.url, contents: `${chosen}× ${category.name}` }
+        })
+        const result = yield* Effect.result(attempt)
+        if (result._tag === "Success") {
+          yield* Effect.logInfo(`Tickets are in the cart at ${result.success.url}`)
+          return result.success
+        }
+        failures.push(`${category.name}: ${result.failure.message}`)
+        yield* Effect.logWarning(`Could not add ${category.name} to the cart: ${result.failure.message}`)
+        yield* openEventPage(page, url)
+      }
+      return yield* new SeatsError({ message: `no category went into the cart (${failures.join("; ")})` })
     }),
   )
 

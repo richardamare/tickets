@@ -83,7 +83,7 @@ export const describeChanges = (previous: Availability, next: Availability): Rea
   return changes
 }
 
-const notify = (title: string, message: string) =>
+export const notify = (title: string, message: string) =>
   process.platform === "darwin"
     ? Effect.tryPromise(
         () =>

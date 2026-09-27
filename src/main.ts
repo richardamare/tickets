@@ -1,10 +1,12 @@
 import { BunRuntime, BunServices } from "@effect/platform-bun"
 import { Config, Console, Effect, Layer, Schema } from "effect"
 import { Argument, Command, Flag } from "effect/unstable/cli"
+import { FetchHttpClient } from "effect/unstable/http"
 import { runAgent } from "./agent.ts"
 import { Browser, Page, ProfileFlag, setupProfile } from "./browser.ts"
 import { Foundry } from "./foundry.ts"
 import { eventim } from "./providers/eventim.ts"
+import { restock } from "./restock.ts"
 import { describeSeats, SeatProviders, SeatsJson } from "./seats.ts"
 import { Secrets } from "./secrets.ts"
 import { AgentState } from "./state.ts"
@@ -86,6 +88,35 @@ const seats = Command.make(
     ),
 ).pipe(Command.withDescription("Read the seating chart of <url> and list the free seats"))
 
+const restockCommand = Command.make(
+  "restock",
+  {
+    url: Argument.String("url").pipe(Argument.withDescription("Fnac Spectacles event page to watch")),
+    quantity: Flag.Int("quantity").pipe(
+      Flag.withDescription("Most tickets to put in the cart; fewer when fewer are left"),
+      Flag.withDefault(1),
+      Flag.filter(
+        (count) => count >= 1,
+        (count) => `--quantity ${count} is below 1`,
+      ),
+    ),
+    every: Flag.Int("every").pipe(
+      Flag.withDescription("Seconds between checks (at least 5)"),
+      Flag.withDefault(10),
+      Flag.filter(
+        (seconds) => seconds >= 5,
+        (seconds) => `--every ${seconds} is below the 5 second minimum`,
+      ),
+    ),
+  },
+  ({ url, quantity, every }) =>
+    restock(url, { quantity, everySeconds: every }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(Browser.layer, FetchHttpClient.layer))),
+).pipe(
+  Command.withDescription(
+    "Poll Eventim's availability API for <url> and, as soon as tickets are free, put up to --quantity of them in the cart in a ready Edge, then notify you and stop",
+  ),
+)
+
 const profile = Command.make(
   "profile",
   { name: Argument.String("name").pipe(Argument.withDescription("Name of the account, used later as --profile <name>")) },
@@ -97,7 +128,7 @@ const profile = Command.make(
 )
 
 const scraper = Command.make("ticket-scraper").pipe(
-  Command.withSubcommands([title, agent, watchCommand, seats, profile]),
+  Command.withSubcommands([title, agent, watchCommand, restockCommand, seats, profile]),
   Command.withGlobalFlags([ProfileFlag]),
 )
 

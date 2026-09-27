@@ -242,13 +242,15 @@ export class Browser extends Context.Service<
   Browser,
   {
     readonly newPage: Effect.Effect<PageShape, BrowserError, Scope.Scope>
+    readonly pid: number
+    readonly untilClosed: Effect.Effect<void, BrowserError>
   }
 >()("Browser") {
   static readonly layer = Layer.effect(
     Browser,
     Effect.gen(function* () {
       const profile = yield* Option.match(yield* ProfileFlag, { onSome: savedProfile, onNone: () => baseProfileCopy })
-      const { cdpUrl } = yield* closeOnRelease(launchEdge(profile, { visible: false }))
+      const { pid, cdpUrl } = yield* closeOnRelease(launchEdge(profile, { visible: false }))
       const browser = yield* Effect.acquireRelease(
         attempt("attach to Edge", () => chromium.connectOverCDP(cdpUrl)).pipe(Effect.tap(Effect.logDebug("Playwright attached over CDP"))),
         (browser) => attempt("detach from Edge", () => browser.close()).pipe(Effect.ignore({ log: "Warn" })),
@@ -271,7 +273,9 @@ export class Browser extends Context.Service<
           attempt("close page", () => page.close()).pipe(Effect.ignore({ log: "Warn" }), Effect.andThen(Effect.logDebug("Closed the tab"))),
       ).pipe(Effect.map(makePage))
 
-      return { newPage }
+      const untilClosed = attempt("wait for the Edge window to close", () => waitForWindowsClosed(pid, cdpUrl))
+
+      return { newPage, pid, untilClosed }
     }),
   )
 }
