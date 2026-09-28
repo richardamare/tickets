@@ -54,7 +54,7 @@ const announceCart = (cart: Cart, page: PageShape, pid: number, group: string) =
     yield* Effect.tryPromise(() => Bun.$`afplay /System/Library/Sounds/Glass.aiff`.quiet()).pipe(Effect.ignore)
   })
 
-export const restock = (url: string, options: { readonly quantity: number; readonly everySeconds: number }) =>
+export const restock = (url: string, options: { readonly quantity: number; readonly everySeconds: number; readonly cartRefreshes: number }) =>
   Effect.gen(function* () {
     const event = yield* Effect.try({ try: () => new URL(url), catch: () => new SeatsError({ message: `${url} is not a URL` }) })
     const eventId = eventIdOf(event)
@@ -98,7 +98,7 @@ export const restock = (url: string, options: { readonly quantity: number; reado
         if (now !== last) yield* Console.log(`[${yield* stamp}] ${now}`)
         last = now
         if (result.success._tag === "Free") {
-          const bought = yield* Effect.result(addBestToCart(event, options.quantity, result.success.free).pipe(Effect.provideService(Page, page)))
+          const bought = yield* Effect.result(addBestToCart(event, options.quantity, result.success.free, options.cartRefreshes).pipe(Effect.provideService(Page, page)))
           if (bought._tag === "Success") cart = bought.success
           else {
             yield* Console.error(`[${yield* stamp}] could not fill the cart: ${bought.failure.message}`)

@@ -108,9 +108,17 @@ const restockCommand = Command.make(
         (seconds) => `--every ${seconds} is below the 5 second minimum`,
       ),
     ),
+    cartRefreshes: Flag.Int("cart-refreshes").pipe(
+      Flag.withDescription("Times to refresh a cart that shows no tickets before trying the next category"),
+      Flag.withDefault(2),
+      Flag.filter(
+        (count) => count >= 0,
+        (count) => `--cart-refreshes ${count} is below 0`,
+      ),
+    ),
   },
-  ({ url, quantity, every }) =>
-    restock(url, { quantity, everySeconds: every }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(Browser.layer, FetchHttpClient.layer))),
+  ({ url, quantity, every, cartRefreshes }) =>
+    restock(url, { quantity, everySeconds: every, cartRefreshes }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(Browser.layer, FetchHttpClient.layer))),
 ).pipe(
   Command.withDescription(
     "Poll Eventim's availability API for <url> and, as soon as tickets are free, put up to --quantity of them in the cart in a ready Edge, then notify you and stop",

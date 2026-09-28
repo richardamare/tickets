@@ -390,8 +390,26 @@ type Category = { readonly index: number; readonly name: string; readonly typeIn
 
 const categoryForm = (index: number) => `[data-qa="price-category"] form >> nth=${index}`
 
+// The cart renders its tickets after the page loads, and an error in their place often clears on a refresh.
+const confirmCart = (page: PageShape, refreshes: number) =>
+  Effect.gen(function* () {
+    for (let refresh = 0; ; refresh++) {
+      const shown = yield* page.use("wait for the tickets in the cart", (raw) =>
+        raw.waitForFunction(`/Shopping Cart\\s+\\d+ tickets?,/.test(document.body.innerText)`, undefined, { timeout: 5_000 }).then(
+          () => true,
+          () => false,
+        ),
+      )
+      if (shown) return
+      if (refresh === refreshes)
+        return yield* new SeatsError({ message: `the cart shows no tickets, even after ${refreshes} refresh(es), at ${yield* page.url}` })
+      yield* Effect.logWarning(`The cart shows no tickets; refreshing it (${refresh + 1} of ${refreshes})`)
+      yield* page.use("refresh the cart", (raw) => raw.reload())
+    }
+  })
+
 // The ticket list beside the seat map sells the best seats left in a category, so no seat needs choosing.
-export const addBestToCart = (url: URL, quantity: number, free: ReadonlyMap<string, number>) =>
+export const addBestToCart = (url: URL, quantity: number, free: ReadonlyMap<string, number>, cartRefreshes: number) =>
   Page.use((page) =>
     Effect.gen(function* () {
       // The consent banner was answered when the tab first opened, and waiting for one that never shows costs 3 seconds;
@@ -441,6 +459,7 @@ export const addBestToCart = (url: URL, quantity: number, free: ReadonlyMap<stri
           yield* click(page, `${categoryForm(category.index)} >> [data-qa="add-to-shopping-cart"]`, "h1")
           if (new URL(yield* Fiber.join(landed)).pathname.includes("/event/"))
             return yield* new SeatsError({ message: "the site sent the selection back to the event page" })
+          yield* confirmCart(page, cartRefreshes)
           return { url: yield* page.url, contents: `${chosen}× ${category.name}` }
         })
         const result = yield* Effect.result(attempt)
