@@ -36,6 +36,7 @@ test("both modes accept half-second checks and reject shorter intervals and non-
   expect(answer(watch, "0.5").form.every).toBe(0.5)
   let restock = answer(startForm("restock"), "https://fnacspectacles.com/event/show-123/").form
   restock = answer(restock, "2").form
+  restock = answer(restock, "").form
   expect(formQuestion(restock).defaultValue).toBe("0.5")
   expect(submitForm(restock, "0.4").error).toContain("0.5")
   expect(answer(restock, "0.5").form.every).toBe(0.5)
@@ -60,4 +61,19 @@ test("both listener modes freeze the selected browser and profile through review
     expect(request.profile).toBe("alice")
     expect(listenerArguments(request).slice(-4)).toEqual(["--profile", "alice", "--browser", "edge"])
   }
+})
+
+test("restock asks which tickets to try first, defaults to the cheapest and passes the choice on", () => {
+  let form = answer(startForm("restock"), "https://fnacspectacles.com/event/show-123/").form
+  form = answer(form, "50").form
+  expect(form.step).toBe("prefer")
+  expect(formQuestion(form).defaultValue).toBe("1")
+  expect(submitForm(form, "3").error).toContain("Cheapest")
+  expect(answer(form, "").form.prefer).toBe("cheapest")
+  form = answer(form, "2").form
+  expect(form.prefer).toBe("most-free")
+  form = answer(answer(form, "").form, "").form
+  const { request } = submitForm(form, "")
+  expect(request && listenerArguments(request)).toContain("most-free")
+  expect(request && listenerArguments(request)).toContain("50")
 })

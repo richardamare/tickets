@@ -1,7 +1,7 @@
 import { Data, Effect, Fiber, Schema } from "effect"
 import { HttpClient } from "effect/unstable/http"
 import { Page, type PageShape } from "../browser.ts"
-import { type Seat, type SeatProvider, SeatsError } from "../seats.ts"
+import { type Cart, type Seat, type SeatProvider, SeatsError } from "../seats.ts"
 
 const SeatDelta = Schema.Tuple([Schema.Number, Schema.Number, Schema.Number])
 
@@ -394,7 +394,16 @@ export const openEventPage = (page: PageShape, url: URL) =>
     yield* declineConsent(page)
   })
 
-type Category = { readonly index: number; readonly name: string; readonly typeIndex: number; readonly max: number }
+type Category = { readonly index: number; readonly name: string; readonly typeIndex: number; readonly max: number; readonly price: number }
+
+// Which category a cart attempt tries first; the rest follow as fallbacks.
+export const CategoryOrder = { Cheapest: "cheapest", MostFree: "most-free" } as const
+export type CategoryOrder = (typeof CategoryOrder)[keyof typeof CategoryOrder]
+
+// The session cookie holds the cart, so a browser without Fnac's cookies starts a cart of its own.
+export const cartCookies = /(^|\.)fnacspectacles\.com$/
+
+export type Reserved = Cart & { readonly tickets: number }
 
 const categoryForm = (index: number) => `[data-qa="price-category"] form >> nth=${index}`
 
@@ -418,7 +427,7 @@ const confirmCart = (page: PageShape, refreshes: number) =>
   })
 
 // The ticket list beside the seat map sells the best seats left in a category, so no seat needs choosing.
-export const addBestToCart = (url: URL, quantity: number, free: ReadonlyMap<string, number>, cartRefreshes: number) =>
+export const addBestToCart = (url: URL, quantity: number, free: ReadonlyMap<string, number>, cartRefreshes: number, order: CategoryOrder) =>
   Page.use((page) =>
     Effect.gen(function* () {
       // The consent banner was answered when the tab first opened, and waiting for one that never shows costs 3 seconds;
@@ -441,13 +450,20 @@ export const addBestToCart = (url: URL, quantity: number, free: ReadonlyMap<stri
             let typeIndex = types.findIndex((type) => !type.getAttribute("data-marketing-label-id") && buyable(type))
             if (typeIndex === -1) typeIndex = types.findIndex(buyable)
             const max = Number(types[typeIndex]?.querySelector(".js-stepper")?.getAttribute("data-max") ?? 0)
-            return { index, name: (form.getAttribute("data-qa") ?? "").replace(/^pc-list-number-/, ""), typeIndex, max }
+            // "€ 84.53" in English; a price that cannot be read sorts last.
+            const shown = types[typeIndex]?.querySelector('[data-qa="tickettypeItem-price"]')?.textContent?.replace(/[^\d.,]/g, "").replace(",", ".") ?? ""
+            const price = shown === "" ? Number.POSITIVE_INFINITY : Number(shown)
+            return { index, name: (form.getAttribute("data-qa") ?? "").replace(/^pc-list-number-/, ""), typeIndex, max, price: Number.isNaN(price) ? Number.POSITIVE_INFINITY : price }
           }),
         ),
       )
       const candidates = categories
         .filter((category) => category.typeIndex !== -1 && category.max > 0)
-        .sort((a, b) => (free.get(b.name) ?? 0) - (free.get(a.name) ?? 0))
+        .sort((a, b) => {
+          const byFree = (free.get(b.name) ?? 0) - (free.get(a.name) ?? 0)
+          const byPrice = a.price - b.price
+          return order === CategoryOrder.Cheapest ? byPrice || byFree : byFree || byPrice
+        })
       if (candidates.length === 0) return yield* new SeatsError({ message: "no ticket category on the page can be bought" })
 
       const failures: Array<string> = []
@@ -470,7 +486,7 @@ export const addBestToCart = (url: URL, quantity: number, free: ReadonlyMap<stri
           if (new URL(yield* Fiber.join(landed)).pathname.includes("/event/"))
             return yield* new SeatsError({ message: "the site sent the selection back to the event page" })
           yield* confirmCart(page, cartRefreshes)
-          return { url: yield* page.url, contents: `${chosen}× ${category.name}` }
+          return { url: yield* page.url, contents: `${chosen}× ${category.name}`, tickets: chosen } satisfies Reserved
         })
         const result = yield* Effect.result(attempt)
         if (result._tag === "Success") {

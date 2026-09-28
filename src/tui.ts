@@ -106,7 +106,7 @@ export const renderDashboard = (
   const bodyHeight = Math.max(1, height - header.length - 4 - panelHeight)
   if (view.help) {
     body.push(line("  Keyboard shortcuts · ? or Esc to close", "1"), "", ...[
-      "  ↑/↓            Select listener, command or account", "  →              Bring the selected listener's browser to the front", "  Enter          Expand selected listener / submit prompt",
+      "  ↑/↓            Select listener, command or account", "  →              Bring the selected listener's browsers to the front", "  Enter          Expand selected listener / submit prompt",
       "  Home/End       First / last listener", "  PgUp/PgDn      Move ten listeners",
       "  Ctrl+X         Stop selected listener", "  Ctrl+X Ctrl+X  Stop and archive selected listener",
       "  Tab            Complete slash command", "  Ctrl+B         Previous setup question", "  Esc            Cancel setup / clear filter",
@@ -248,8 +248,8 @@ export const dashboard = Effect.scoped(Effect.gen(function* () {
       }
       if (view.pendingReveal) {
         const row = rows.find((row) => row.id === view.pendingReveal)
-        const pid = row?.browserPid
-        const result = pid === undefined ? undefined : yield* Effect.result(runCommand("osascript", ["-e", `tell application "System Events" to set frontmost of (first process whose unix id is ${pid}) to true`]))
+        const pids = row?.browserPids ?? []
+        const result = pids.length === 0 ? undefined : yield* Effect.result(Effect.forEach(pids, (pid) => runCommand("osascript", ["-e", `tell application "System Events" to set frontmost of (first process whose unix id is ${pid}) to true`]), { discard: true }))
         view = { ...view, pendingReveal: undefined, notice: result === undefined ? "This listener has no open browser." : result._tag === "Failure" ? `Cannot open the browser: ${result.failure.message}` : undefined }
       }
       if (view.pendingArchive) {

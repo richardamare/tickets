@@ -17,12 +17,12 @@ export const ListenerRecord = Schema.Struct({
   heartbeatAt: Schema.Number,
   lastCheckAt: Schema.optional(Schema.Number),
   nextCheckAt: Schema.optional(Schema.Number),
-  browserPid: Schema.optional(Schema.Number),
+  browserPids: Schema.optional(Schema.Array(Schema.Number)),
   history: Schema.Array(Schema.Struct({ at: Schema.Number, message: Schema.String })),
 })
 export type ListenerRecord = typeof ListenerRecord.Type
 export type ListenerInput = Pick<ListenerRecord, "kind" | "url" | "profile" | "profileKey" | "browser" | "everySeconds">
-type Update = Partial<Pick<ListenerRecord, "status" | "message" | "lastCheckAt" | "nextCheckAt" | "browserPid">>
+type Update = Partial<Pick<ListenerRecord, "status" | "message" | "lastCheckAt" | "nextCheckAt" | "browserPids">>
 export interface Listener {
   readonly url: string
   readonly update: (update: Update) => Effect.Effect<void>

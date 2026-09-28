@@ -194,36 +194,50 @@ export const setupProfile = (name: string, browser?: BrowserKind) => Effect.scop
   }).pipe(Effect.onError((cause) => profiles.markSetupFailed(selection, Cause.pretty(cause)).pipe(Effect.ignore({ log: "Warn" }))))
 }))
 
+export interface BrowserShape {
+  readonly newPage: Effect.Effect<PageShape, BrowserError, Scope.Scope>
+  readonly pid: number
+  readonly untilClosed: Effect.Effect<void, BrowserError>
+  readonly name: string
+  readonly selection: BrowserSelection
+  readonly clearCookies: (domain: RegExp) => Effect.Effect<void, BrowserError>
+}
+
+// Each browser runs on its own copy of the source profile, so several can run side by side.
+const openBrowser = (selection: BrowserSelection) => Effect.gen(function* () {
+  const profiles = yield* makeBrowserProfiles()
+  const profile = yield* profiles.clone(selection)
+  const running = yield* launchBrowser(selection.browser, profile, false)
+  const name = browserName(selection.browser)
+  const context = running.raw.contexts()[0]
+  if (!context) return yield* new BrowserError({ operation: `attach to ${name}`, cause: "The browser exposed no default context" })
+  const cdp = yield* attempt(`attach to ${name}`, () => running.raw.newBrowserCDPSession())
+  const openInBackground = () => Promise.all([
+    context.waitForEvent("page"),
+    cdp.send("Target.createTarget", { url: "about:blank", background: true }),
+  ]).then(([page]) => page)
+  const newPage = Effect.acquireRelease(
+    attempt("open page", openInBackground),
+    (page) => attempt("close page", () => page.close()).pipe(Effect.ignore({ log: "Warn" })),
+  ).pipe(Effect.map(makePage))
+  return {
+    newPage, pid: running.pid, name, selection,
+    untilClosed: running.untilClosed.pipe(Effect.mapError((cause) => new BrowserError({ operation: "wait for browser windows to close", cause }))),
+    clearCookies: (domain: RegExp) => attempt(`clear cookies for ${domain}`, () => context.clearCookies({ domain })),
+  } satisfies BrowserShape
+})
+
 export class Browser extends Context.Service<
   Browser,
-  {
-    readonly newPage: Effect.Effect<PageShape, BrowserError, Scope.Scope>
-    readonly pid: number
-    readonly untilClosed: Effect.Effect<void, BrowserError>
-    readonly name: string
-    readonly selection: BrowserSelection
+  BrowserShape & {
+    // Another browser on a fresh copy of the same source, closed with the scope it opens in.
+    readonly openAnother: Effect.Effect<BrowserShape, Effect.Error<ReturnType<typeof openBrowser>>, Scope.Scope>
   }
 >()("Browser") {
   static readonly layerFor = (selection: BrowserSelection) => Layer.effect(Browser, Effect.gen(function* () {
-    const profiles = yield* makeBrowserProfiles()
-    const profile = yield* profiles.clone(selection)
-    const running = yield* launchBrowser(selection.browser, profile, false)
-    const name = browserName(selection.browser)
-    const context = running.raw.contexts()[0]
-    if (!context) return yield* new BrowserError({ operation: `attach to ${name}`, cause: "The browser exposed no default context" })
-    const cdp = yield* attempt(`attach to ${name}`, () => running.raw.newBrowserCDPSession())
-    const openInBackground = () => Promise.all([
-      context.waitForEvent("page"),
-      cdp.send("Target.createTarget", { url: "about:blank", background: true }),
-    ]).then(([page]) => page)
-    const newPage = Effect.acquireRelease(
-      attempt("open page", openInBackground),
-      (page) => attempt("close page", () => page.close()).pipe(Effect.ignore({ log: "Warn" })),
-    ).pipe(Effect.map(makePage))
-    return {
-      newPage, pid: running.pid, name, selection,
-      untilClosed: running.untilClosed.pipe(Effect.mapError((cause) => new BrowserError({ operation: "wait for browser windows to close", cause }))),
-    }
+    const first = yield* openBrowser(selection)
+    const services = yield* Effect.context<Exclude<Effect.Services<ReturnType<typeof openBrowser>>, Scope.Scope>>()
+    return { ...first, openAnother: openBrowser(selection).pipe(Effect.provideContext(services)) }
   }))
 
   static readonly layer = Layer.unwrap(Effect.gen(function* () {

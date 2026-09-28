@@ -13,15 +13,16 @@ export const CheckInterval = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0
 export const TicketQuantity = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(100))
 export const ProfileName = Schema.String.check(Schema.makeFilter((value) => value === "" || (value !== "." && value !== ".." && /^[a-zA-Z0-9._-]+$/.test(value))))
 export const WatchUntil = Schema.Literals(["", "on_sale", "sold_out", "not_yet_on_sale", "resale_only"])
-export const defaults = { watchEvery: 0.5, restockEvery: 0.5, quantity: 1 } as const
+export const TicketOrder = Schema.Literals(["cheapest", "most-free"])
+export const defaults = { watchEvery: 0.5, restockEvery: 0.5, quantity: 1, prefer: "cheapest" } as const
 export const ListenerRequest = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("watch"), url: RestockUrl, every: CheckInterval, until: WatchUntil, profile: ProfileName, browser: Schema.optional(BrowserKind) }),
-  Schema.Struct({ kind: Schema.Literal("restock"), url: RestockUrl, every: CheckInterval, quantity: TicketQuantity, profile: ProfileName, browser: Schema.optional(BrowserKind) }),
+  Schema.Struct({ kind: Schema.Literal("restock"), url: RestockUrl, every: CheckInterval, quantity: TicketQuantity, prefer: Schema.optional(TicketOrder), profile: ProfileName, browser: Schema.optional(BrowserKind) }),
 ])
 export type ListenerRequest = typeof ListenerRequest.Type
 export const listenerArguments = (request: ListenerRequest): string[] => [
   request.kind, request.url, "--every", String(request.every),
-  ...(request.kind === "restock" ? ["--quantity", String(request.quantity)] : request.until ? ["--until", request.until] : []),
+  ...(request.kind === "restock" ? ["--quantity", String(request.quantity), ...(request.prefer ? ["--prefer", request.prefer] : [])] : request.until ? ["--until", request.until] : []),
   ...(request.profile ? ["--profile", request.profile] : []),
   ...(request.browser ? ["--browser", request.browser] : []),
 ]

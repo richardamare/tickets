@@ -14,3 +14,13 @@ for (const mode of ["watch", "restock"]) {
     expect(Number(code)).toBe(0)
   })
 }
+
+test("restock above the per-cart limit fills one cart per browser, each extra browser without the cart cookies", async () => {
+  const code = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    const path = yield* Path.Path
+    const fixture = yield* path.fromFileUrl(new URL("./test-fixtures/restock-carts-worker.ts", import.meta.url))
+    const child = yield* ChildProcess.make(process.execPath, [fixture], { stdin: "ignore", stdout: "ignore", stderr: "inherit" })
+    return yield* child.exitCode
+  })).pipe(Effect.provide(BunServices.layer)))
+  expect(Number(code)).toBe(0)
+})

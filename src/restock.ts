@@ -1,6 +1,6 @@
 import { Clock, Console, Effect } from "effect"
-import { Browser, type PageShape, Page } from "./browser.ts"
-import { type AccessDenied, addBestToCart, eventIdOf, eventim, freeTickets, openEventPage, readAvailability, readMapping } from "./providers/eventim.ts"
+import { Browser, type BrowserShape, type PageShape, Page } from "./browser.ts"
+import { type AccessDenied, addBestToCart, cartCookies, type CategoryOrder, eventIdOf, eventim, freeTickets, openEventPage, readAvailability, readMapping, type Reserved } from "./providers/eventim.ts"
 import { type Cart, SeatsError } from "./seats.ts"
 import { findExecutable, notify, notifyUntilClicked, runCommand } from "./notifications.ts"
 import type { Listener } from "./listeners.ts"
@@ -32,7 +32,13 @@ const announceCart = (cart: Cart, page: PageShape, pid: number, group: string) =
     yield* runCommand("afplay", ["/System/Library/Sounds/Glass.aiff"]).pipe(Effect.ignore)
   })
 
-export const restock = (url: string, options: { readonly quantity: number; readonly everySeconds: number; readonly cartRefreshes: number }, listener?: Listener) =>
+type Window = { readonly browser: BrowserShape; readonly page: PageShape }
+
+export const restock = (
+  url: string,
+  options: { readonly quantity: number; readonly everySeconds: number; readonly cartRefreshes: number; readonly order: CategoryOrder },
+  listener?: Listener,
+) =>
   Effect.gen(function* () {
     const event = yield* Effect.try({ try: () => new URL(url), catch: () => new SeatsError({ message: `${url} is not a URL` }) })
     const eventId = eventIdOf(event)
@@ -40,17 +46,23 @@ export const restock = (url: string, options: { readonly quantity: number; reado
       return yield* new SeatsError({ message: `${url} is not a Fnac Spectacles event page (…/event/<id>/ or …/event/<name>-<id>/)` })
 
     const browser = yield* Browser
-    const page: PageShape = yield* browser.newPage
-    if (listener) yield* listener.update({ message: `Opening ${browser.name} on the event page`, browserPid: browser.pid })
-    yield* Effect.logInfo("Opening the event page so the browser is ready to buy")
+    const windows: Array<Window> = []
+    let denied: AccessDenied | undefined
     // A blocked page is reloaded on the first hit anyway, so the API keeps being polled meanwhile.
-    const opened = yield* Effect.result(openEventPage(page, event))
-    if (opened._tag === "Failure" && opened.failure._tag !== "AccessDenied") return yield* opened.failure
-    let denied: AccessDenied | undefined = opened._tag === "Failure" && opened.failure._tag === "AccessDenied" ? opened.failure : undefined
-    if (denied !== undefined) {
-      yield* Console.error(`[${new Date(yield* Clock.currentTimeMillis).toISOString()}] event page ${denied.message}`)
-      yield* notify("Restock blocked", denied.message)
-    }
+    const ready = (next: BrowserShape) => Effect.gen(function* () {
+      const page = yield* next.newPage
+      windows.push({ browser: next, page })
+      if (listener) yield* listener.update({ message: `Opening ${next.name} on the event page`, browserPids: windows.map((window) => window.browser.pid) })
+      yield* Effect.logInfo("Opening the event page so the browser is ready to buy")
+      const opened = yield* Effect.result(openEventPage(page, event))
+      if (opened._tag === "Failure" && opened.failure._tag !== "AccessDenied") return yield* opened.failure
+      denied = opened._tag === "Failure" && opened.failure._tag === "AccessDenied" ? opened.failure : undefined
+      if (denied !== undefined) {
+        yield* Console.error(`[${new Date(yield* Clock.currentTimeMillis).toISOString()}] event page ${denied.message}`)
+        yield* notify("Restock blocked", denied.message)
+      }
+    })
+    yield* ready(browser)
 
     let mapping = yield* readMapping(eventId).pipe(Effect.orElseSucceed(() => ({ _tag: "NoSeatmap" }) as const))
     const check = Effect.gen(function* () {
@@ -66,8 +78,11 @@ export const restock = (url: string, options: { readonly quantity: number; reado
     yield* Console.log(`[${yield* stamp}] Watching ${event.href} every ${options.everySeconds}s for up to ${options.quantity} ticket(s)`)
     let last = ""
     let failures = 0
-    let cart: Cart | undefined
-    while (cart === undefined) {
+    const carts: Array<{ readonly reserved: Reserved; readonly window: Window }> = []
+    const held = () => carts.reduce((total, { reserved }) => total + reserved.tickets, 0)
+    const progress = () => carts.length === 0 ? "" : `${held()} of ${options.quantity} in ${carts.length} cart(s) · `
+    let full = false
+    while (!full) {
       const startedAt = yield* Clock.currentTimeMillis
       if (listener) yield* listener.update({ status: "checking", nextCheckAt: undefined })
       const result = yield* Effect.result(check)
@@ -83,14 +98,39 @@ export const restock = (url: string, options: { readonly quantity: number; reado
         failures = 0
         const now = describe(result.success)
         // The API can answer while the site still blocks the browser, so a block shows until a cart attempt gets through.
-        if (listener) yield* listener.update(denied === undefined ? { status: "waiting", message: now, lastCheckAt: yield* Clock.currentTimeMillis } : { status: "blocked", message: `${denied.reason} in the browser · ${now}`, lastCheckAt: yield* Clock.currentTimeMillis })
+        if (listener) yield* listener.update(denied !== undefined
+          ? { status: "blocked", message: `${denied.reason} in the browser · ${progress()}${now}`, lastCheckAt: yield* Clock.currentTimeMillis }
+          : { status: carts.length > 0 ? "in_cart" : "waiting", message: `${progress()}${now}`, lastCheckAt: yield* Clock.currentTimeMillis })
         if (now !== last) yield* Console.log(`[${yield* stamp}] ${now}`)
         last = now
         if (result.success._tag === "Free") {
           if (listener) yield* listener.update({ status: "carting", message: "Tickets available; adding to cart" })
-          const bought = yield* Effect.result(addBestToCart(event, options.quantity, result.success.free, options.cartRefreshes).pipe(Effect.provideService(Page, page)))
-          if (bought._tag === "Success") cart = bought.success
-          else {
+          const window = windows.at(-1)!
+          const bought = yield* Effect.result(addBestToCart(event, options.quantity - held(), result.success.free, options.cartRefreshes, options.order).pipe(Effect.provideService(Page, window.page)))
+          if (bought._tag === "Success") {
+            denied = undefined
+            carts.push({ reserved: bought.success, window })
+            full = held() >= options.quantity
+            yield* Console.log(`[${yield* stamp}] IN THE CART ${carts.length}: ${bought.success.contents} at ${bought.success.url} (${held()} of ${options.quantity})`)
+            if (listener) yield* listener.update({ status: "in_cart", message: `${progress()}pay in ${window.browser.name} before the hold expires` })
+            // Each cart's hold runs out on its own, so each is announced the moment it fills.
+            yield* announceCart(bought.success, window.page, window.browser.pid, `ticket-scraper-restock-${eventId}-${carts.length}`).pipe(Effect.ignore({ log: "Warn" }), Effect.forkScoped)
+            if (full) break
+            // The site caps how many tickets one cart takes, and a browser that shares the first one's cookies shares
+            // its cart, so the rest go into another browser that starts without them.
+            yield* Console.log(`[${yield* stamp}] opening another ${browser.name} for the remaining ${options.quantity - held()} ticket(s)`)
+            const another = yield* Effect.result(Effect.gen(function* () {
+              const next = yield* browser.openAnother
+              yield* next.clearCookies(cartCookies)
+              yield* ready(next)
+            }))
+            if (another._tag === "Failure") {
+              yield* Console.error(`[${yield* stamp}] could not open another browser: ${another.failure.message}`)
+              yield* notify("Restock stopped short", `${held()} of ${options.quantity} tickets in the cart; no browser for the rest: ${another.failure.message}`)
+              break
+            }
+            continue
+          } else {
             if (bought.failure._tag === "AccessDenied" && denied === undefined) yield* notify("Restock blocked", bought.failure.message)
             denied = bought.failure._tag === "AccessDenied" ? bought.failure : undefined
             if (listener) yield* listener.update(denied === undefined
@@ -101,18 +141,13 @@ export const restock = (url: string, options: { readonly quantity: number; reado
           }
         }
       }
-      if (cart !== undefined) break
       const nextCheckAt = Math.max(yield* Clock.currentTimeMillis, startedAt + options.everySeconds * 1000)
       if (listener) yield* listener.update({ nextCheckAt })
       yield* Effect.sleep(Math.max(0, nextCheckAt - (yield* Clock.currentTimeMillis)))
     }
 
-    if (listener) yield* listener.update({ status: "in_cart", message: `${cart.contents} — pay in ${browser.name} before the hold expires`, nextCheckAt: undefined })
-    yield* Console.log(`[${yield* stamp}] IN THE CART: ${cart.contents} at ${cart.url}`)
-    yield* Console.log(`Pay in the ${browser.name} window before the hold runs out; closing that window ends this command.`)
-    // The notification waits for its click only while the cart's browser is open.
-    yield* Effect.raceFirst(
-      announceCart(cart, page, browser.pid, `ticket-scraper-restock-${eventId}`).pipe(Effect.ignore({ log: "Warn" }), Effect.andThen(Effect.never)),
-      browser.untilClosed,
-    )
+    const cartBrowsers = carts.map(({ window }) => window.browser)
+    if (listener) yield* listener.update({ status: "in_cart", message: `${progress()}pay in each ${browser.name} window before its hold expires`, nextCheckAt: undefined })
+    yield* Console.log(`Pay in each ${browser.name} window before its hold runs out; closing every one of them ends this command.`)
+    yield* Effect.forEach(cartBrowsers, (cartBrowser) => cartBrowser.untilClosed, { concurrency: "unbounded", discard: true })
   })

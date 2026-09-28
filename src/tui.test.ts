@@ -279,7 +279,7 @@ test("dashboard stops and archives the selected listener on a double Ctrl+X", as
 })
 
 test("→ raises the browser of a live listener that has one and explains when there is none", () => {
-  const withBrowser = { ...row, id: "cart", status: "in_cart" as const, browserPid: 4242 }
+  const withBrowser = { ...row, id: "cart", status: "in_cart" as const, browserPids: [4242] }
   expect(handleKey({ ...initialView, selectedId: "cart" }, key("right"), [withBrowser]).pendingReveal).toBe("cart")
   expect(handleKey(initialView, key("right"), [row]).notice).toBe("This listener has no open browser.")
   expect(handleKey({ ...initialView, selectedId: "cart" }, key("right"), [{ ...withBrowser, status: "stale" as const }]).pendingReveal).toBeUndefined()

@@ -74,10 +74,12 @@ In the dashboard:
 
 1. Type `/restock` and press Enter.
 2. Paste the Fnac Spectacles event link, such as `https://www.fnacspectacles.com/event/…-22002879/`, and press Enter.
-3. Press Enter to accept each suggested value, or type your own, such as how many tickets.
+3. Press Enter to accept each suggested value, or type your own: how many tickets, and whether to take the **cheapest** first (the default) or the category with the **most free tickets**.
 4. Press Enter on **Start**.
 
 The listener checks every half second. When tickets appear, it puts them in the cart and sends a notification. Click it and **pay within about 15 minutes**. The app never pays for you.
+
+The site limits how many tickets one order takes, often 4 to 6. Ask for more, and the app opens **another browser window for each further cart**, each with its own notification and its own 15 minutes. Pay in each window; the extra windows ask you to sign in at checkout.
 
 The first time the app brings the browser to the front, macOS asks whether Terminal may control **System Events**. Click **OK**.
 

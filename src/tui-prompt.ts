@@ -150,7 +150,7 @@ export const handleKey = (view: View, event: Terminal.UserInput, rows: readonly 
       const visible = visibleListeners(rows, view)
       const row = visible.find((row) => row.id === view.selectedId) ?? visible[0]
       // A stale row's process may be gone and its pid reused, so only a live listener's browser is raised.
-      return row && isLive(row) && row.browserPid !== undefined
+      return row && isLive(row) && (row.browserPids?.length ?? 0) > 0
         ? { ...view, pendingReveal: row.id, notice: undefined }
         : { ...view, notice: "This listener has no open browser." }
     }
