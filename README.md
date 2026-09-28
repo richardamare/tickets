@@ -1,5 +1,7 @@
 # ticket-scraper
 
+Setting up a new Mac to run this: follow [SETUP.md](SETUP.md).
+
 To install dependencies:
 
 ```bash
