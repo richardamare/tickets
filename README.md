@@ -2,6 +2,8 @@
 
 Setting up a new Mac to run this: follow [SETUP.md](SETUP.md).
 
+Install it as the global `tickets` command with `bun install -g github:richardamare/tickets`, or from a clone with `bun link`. `tickets` runs the same as `bun run start`.
+
 To install dependencies:
 
 ```bash

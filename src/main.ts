@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import { BunRuntime, BunServices } from "@effect/platform-bun"
 import { Config, Console, Effect, Layer, Option, Schema } from "effect"
 import { Argument, Command, Flag } from "effect/unstable/cli"
@@ -170,7 +171,7 @@ const tui = Command.make("tui", {}, () => dashboard).pipe(
   Command.withDescription("Show all watch and restock listeners with live status and keyboard shortcuts"),
 )
 
-const scraper = Command.make("ticket-scraper", {}, () => dashboard).pipe(
+const scraper = Command.make("tickets", {}, () => dashboard).pipe(
   Command.withSubcommands([title, agent, watchCommand, restockCommand, seats, profile, tui]),
   Command.withGlobalFlags([ProfileFlag, BrowserFlag]),
 )

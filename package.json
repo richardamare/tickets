@@ -2,6 +2,9 @@
   "name": "ticket-scraper",
   "version": "0.1.0",
   "module": "src/main.ts",
+  "bin": {
+    "tickets": "src/main.ts"
+  },
   "type": "module",
   "private": true,
   "scripts": {
@@ -11,8 +14,9 @@
   },
   "dependencies": {
     "@azure/identity": "^4.13.3",
-    "@effect/platform-bun": "^4.0.0-rc.117",
-    "effect": "^4.0.0-rc.117",
+    "@effect/platform-bun": "4.0.0-rc.117",
+    "@effect/platform-node-shared": "4.0.0-rc.117",
+    "effect": "4.0.0-rc.117",
     "openai": "^7.23.0",
     "playwright": "^1.63.0"
   },

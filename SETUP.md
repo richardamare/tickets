@@ -46,18 +46,19 @@ terminal-notifier -title "Tickets" -message "Notifications work"
 
 When macOS asks, click **Allow**. If no notification shows, open **System Settings → Notifications → terminal-notifier** and turn on **Allow notifications**.
 
-## 5. Download the app
+## 5. Install the app
 
 ```bash
-git clone https://github.com/richardamare/tickets.git ~/tickets
-cd ~/tickets
-bun install
+bun install -g github:richardamare/tickets
+echo 'export PATH="$HOME/.bun/bin:$PATH"' >> ~/.zprofile && export PATH="$HOME/.bun/bin:$PATH"
 ```
+
+This installs the `tickets` command, which works from any folder. Check it: `tickets --help` prints the commands.
 
 ## 6. Sign in once
 
 ```bash
-cd ~/tickets && bun run start
+tickets
 ```
 
 The dashboard opens.
@@ -85,7 +86,7 @@ The first time the app brings the browser to the front, macOS asks whether Termi
 
 ## Keep it running
 
-- **Closing the dashboard is fine.** Listeners keep running in the background. Run `bun run start` again to see them.
+- **Closing the dashboard is fine.** Listeners keep running in the background. Run `tickets` again to see them.
 - **Keep the Mac awake.** A sleeping Mac checks nothing. Keep it plugged in with the lid open, and run this in a spare Terminal window while you wait:
 
   ```bash
@@ -117,7 +118,7 @@ Press `?` in the dashboard for the full list. The ones you need most:
 ## Update to the latest version
 
 ```bash
-cd ~/tickets && git pull && bun install
+bun install -g github:richardamare/tickets
 ```
 
 Stop your running listeners with `Ctrl+X` and start them again, so they use the new version.
