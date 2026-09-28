@@ -394,7 +394,9 @@ const categoryForm = (index: number) => `[data-qa="price-category"] form >> nth=
 export const addBestToCart = (url: URL, quantity: number, free: ReadonlyMap<string, number>) =>
   Page.use((page) =>
     Effect.gen(function* () {
-      yield* openEventPage(page, url)
+      // The consent banner was answered when the tab first opened, and waiting for one that never shows costs 3 seconds;
+      // a banner that does show fails the attempt, and the retry below reopens the page through openEventPage.
+      yield* page.goto(inEnglish(url))
       const listed = yield* page.use("wait for the ticket categories", (raw) =>
         raw.locator('[data-qa="price-category"]').first().waitFor({ timeout: 20_000 }).then(
           () => true,
