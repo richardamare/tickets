@@ -37,7 +37,7 @@ export const restock = (url: string, options: { readonly quantity: number; reado
     const event = yield* Effect.try({ try: () => new URL(url), catch: () => new SeatsError({ message: `${url} is not a URL` }) })
     const eventId = eventIdOf(event)
     if (!eventim.matches(event) || eventId === undefined)
-      return yield* new SeatsError({ message: `${url} is not a Fnac Spectacles event page (…/event/<name>-<id>/)` })
+      return yield* new SeatsError({ message: `${url} is not a Fnac Spectacles event page (…/event/<id>/ or …/event/<name>-<id>/)` })
 
     const browser = yield* Browser
     const page: PageShape = yield* browser.newPage

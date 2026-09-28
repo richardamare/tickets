@@ -30,7 +30,7 @@ const check = (url: string) => {
   const eventId = eventIdOf(event)
   return eventim.matches(event) && eventId !== undefined
     ? checkWithApi(event, eventId)
-    : Effect.succeed({ _tag: "Failed", reason: `${url} is not a Fnac Spectacles event page (…/event/<name>-<id>/)` } as const)
+    : Effect.succeed({ _tag: "Failed", reason: `${url} is not a Fnac Spectacles event page (…/event/<id>/ or …/event/<name>-<id>/)` } as const)
 }
 
 export const describeChanges = (previous: Availability, next: Availability): ReadonlyArray<string> => {

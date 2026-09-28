@@ -39,7 +39,7 @@ export const submitForm = (form: ListenerForm, raw: string): { form: ListenerFor
   const invalid = (error: string) => ({ form, error })
   switch (form.step) {
     case "url":
-      if (!Schema.is(restockUrl)(value)) return invalid("Paste a valid Fnac Spectacles event link (https://…/event/name-123/).")
+      if (!Schema.is(restockUrl)(value)) return invalid("Paste a valid Fnac Spectacles event link (https://…/event/123/ or https://…/event/name-123/).")
       return { form: { ...form, url: value, step: form.kind === "restock" ? "quantity" : "every" } }
     case "quantity": {
       const count = Number(value || form.quantity)

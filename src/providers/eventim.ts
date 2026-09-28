@@ -331,7 +331,8 @@ const addToCart = (url: URL, seatIds: ReadonlyArray<string>) =>
     }),
   )
 
-export const eventIdOf = (url: URL) => url.pathname.match(/-(\d+)\/?$/)?.[1]
+// Both …/event/<name>-<id>/ and the short …/event/<id>/, which redirects to it.
+export const eventIdOf = (url: URL) => url.pathname.match(/\/event\/(?:[^/]*-)?(\d+)\/?$/)?.[1]
 
 // The site signs these URLs with a timestamp and a signature, but the API answers without them.
 const seatmapUrl = (kind: "mapping" | "availability", eventId: string) =>

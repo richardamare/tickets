@@ -92,6 +92,9 @@ test("the event id is the number at the end of the event page path", () => {
   expect(eventIdOf(new URL("https://www.fnacspectacles.com/event/benjamin-biolay-en-tournee-zenith-paris-la-villette-20811075/"))).toBe("20811075")
   expect(eventIdOf(new URL("https://www.fnacspectacles.com/en/event/le-roi-lion-21844084"))).toBe("21844084")
   expect(eventIdOf(new URL("https://www.fnacspectacles.com/artist/benjamin-biolay/"))).toBeUndefined()
+  expect(eventIdOf(new URL("https://www.fnacspectacles.com/en/event/21511314/"))).toBe("21511314")
+  expect(eventIdOf(new URL("https://www.fnacspectacles.com/event/21511314"))).toBe("21511314")
+  expect(eventIdOf(new URL("https://www.fnacspectacles.com/artist/ahmed-sylla/ahmed-sylla-origami-tournee-3374164/"))).toBeUndefined()
 })
 
 test("the seat map API answering 403 is a block, not a plain failure", async () => {
