@@ -93,3 +93,15 @@ test("the event id is the number at the end of the event page path", () => {
   expect(eventIdOf(new URL("https://www.fnacspectacles.com/en/event/le-roi-lion-21844084"))).toBe("21844084")
   expect(eventIdOf(new URL("https://www.fnacspectacles.com/artist/benjamin-biolay/"))).toBeUndefined()
 })
+
+test("the seat map API answering 403 is a block, not a plain failure", async () => {
+  const { Effect, Layer } = await import("effect")
+  const { HttpClient, HttpClientResponse } = await import("effect/unstable/http")
+  const { readAvailability } = await import("./eventim.ts")
+  const refusing = Layer.succeed(HttpClient.HttpClient, HttpClient.make((request) =>
+    Effect.succeed(HttpClientResponse.fromWeb(request, new Response("<H1>Access Denied</H1>", { status: 403 }))),
+  ))
+  const result = await Effect.runPromise(readAvailability("22002879").pipe(Effect.flip, Effect.provide(refusing)))
+  expect(result._tag).toBe("AccessDenied")
+  expect(result.message).toContain("HTTP 403")
+})

@@ -1,9 +1,11 @@
 import { BunRuntime, BunServices } from "@effect/platform-bun"
-import { Config, Console, Effect, Layer, Schema } from "effect"
+import { Config, Console, Effect, Layer, Option, Schema } from "effect"
 import { Argument, Command, Flag } from "effect/unstable/cli"
 import { FetchHttpClient } from "effect/unstable/http"
 import { runAgent } from "./agent.ts"
-import { Browser, Page, ProfileFlag, setupProfile } from "./browser.ts"
+import { Browser, BrowserFlag, Page, ProfileFlag, setupProfile } from "./browser.ts"
+import { makeBrowserProfiles } from "./browser-config.ts"
+import { CheckInterval, TicketQuantity, RestockUrl, defaults } from "./listener-request.ts"
 import { Foundry } from "./foundry.ts"
 import { eventim } from "./providers/eventim.ts"
 import { restock } from "./restock.ts"
@@ -11,11 +13,17 @@ import { describeSeats, SeatProviders, SeatsJson } from "./seats.ts"
 import { Secrets } from "./secrets.ts"
 import { AgentState } from "./state.ts"
 import { statuses, watch } from "./watch.ts"
+import { withListeners } from "./listeners.ts"
+import { dashboard } from "./tui.ts"
 
 const StateJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Json))
 
 const PageLive = Page.layer.pipe(Layer.provide(Browser.layer))
 const SeatProvidersLive = SeatProviders.layer([eventim])
+const selectedBrowser = Effect.gen(function* () {
+  const profiles = yield* makeBrowserProfiles()
+  return yield* profiles.resolveSelection(Option.getOrUndefined(yield* BrowserFlag), Option.getOrUndefined(yield* ProfileFlag))
+})
 
 const title = Command.make(
   "title",
@@ -51,26 +59,34 @@ const agent = Command.make(
 const watchCommand = Command.make(
   "watch",
   {
-    urls: Argument.String("url").pipe(Argument.withDescription("Event pages to monitor"), Argument.atLeast(1)),
-    every: Flag.Int("every").pipe(
-      Flag.withDescription("Minutes between rounds of checks (at least 5)"),
-      Flag.withDefault(15),
+    urls: Argument.String("url").pipe(Argument.withDescription("Fnac Spectacles event pages to monitor"), Argument.atLeast(1)),
+    every: Flag.Finite("every").pipe(
+      Flag.withDescription("Seconds between rounds of checks (at least 0.5)"),
+      Flag.withDefault(defaults.watchEvery),
       Flag.filter(
-        (minutes) => minutes >= 5,
-        (minutes) => `--every ${minutes} is below the 5 minute minimum`,
+        Schema.is(CheckInterval),
+        () => "--every must be a number from 0.5 to 1000000 seconds",
       ),
     ),
     once: Flag.Boolean("once").pipe(Flag.withDescription("Run one round of checks and exit"), Flag.withDefault(false)),
-    maxSteps: Flag.Int("max-steps").pipe(Flag.withDescription("Model calls per check before giving up"), Flag.withDefault(25)),
     until: Flag.Literals("until", statuses).pipe(
       Flag.withDescription("Stop watching a page once its status is this one; repeat for several"),
       Flag.atLeast(0),
     ),
   },
-  ({ urls, every, once, maxSteps, until }) =>
-    watch(urls, { everyMinutes: every, once, maxSteps, until }).pipe(
-      Effect.provide(Layer.mergeAll(Browser.layer, Foundry.layer, Secrets.layer, SeatProvidersLive)),
-    ),
+  ({ urls, every, once, until }) =>
+    Effect.gen(function* () {
+      for (const url of urls) yield* Schema.decodeUnknownEffect(RestockUrl)(url)
+      const selection = yield* selectedBrowser
+      const { browser, profile } = selection
+      const profileKey = profile === "default" ? "default" : `named:${profile}`
+      return yield* withListeners(
+        [...new Set(urls)].map((url) => ({ kind: "watch", url, browser, profile, profileKey, everySeconds: every })),
+        (listeners) => watch(urls, { everySeconds: every, once, until, browser, profileKey }, listeners).pipe(
+          Effect.provide(FetchHttpClient.layer),
+        ),
+      )
+    }),
 ).pipe(Command.withDescription("Check ticket availability on <url>... and report every change, until each page reaches an --until status"))
 
 const seats = Command.make(
@@ -94,18 +110,18 @@ const restockCommand = Command.make(
     url: Argument.String("url").pipe(Argument.withDescription("Fnac Spectacles event page to watch")),
     quantity: Flag.Int("quantity").pipe(
       Flag.withDescription("Most tickets to put in the cart; fewer when fewer are left"),
-      Flag.withDefault(1),
+      Flag.withDefault(defaults.quantity),
       Flag.filter(
-        (count) => count >= 1,
-        (count) => `--quantity ${count} is below 1`,
+        Schema.is(TicketQuantity),
+        () => "--quantity must be a whole number from 1 to 100",
       ),
     ),
-    every: Flag.Int("every").pipe(
-      Flag.withDescription("Seconds between checks (at least 5)"),
-      Flag.withDefault(10),
+    every: Flag.Finite("every").pipe(
+      Flag.withDescription("Seconds between checks (at least 0.5)"),
+      Flag.withDefault(defaults.restockEvery),
       Flag.filter(
-        (seconds) => seconds >= 5,
-        (seconds) => `--every ${seconds} is below the 5 second minimum`,
+        Schema.is(CheckInterval),
+        () => "--every must be a number from 0.5 to 1000000 seconds",
       ),
     ),
     cartRefreshes: Flag.Int("cart-refreshes").pipe(
@@ -118,26 +134,41 @@ const restockCommand = Command.make(
     ),
   },
   ({ url, quantity, every, cartRefreshes }) =>
-    restock(url, { quantity, everySeconds: every, cartRefreshes }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(Browser.layer, FetchHttpClient.layer))),
+    Effect.gen(function* () {
+      yield* Schema.decodeUnknownEffect(RestockUrl)(url)
+      const selection = yield* selectedBrowser
+      const { browser, profile } = selection
+      const profileKey = profile === "default" ? "default" : `named:${profile}`
+      return yield* withListeners(
+        [{ kind: "restock", url, browser, profile, profileKey, everySeconds: every }],
+        ([listener]) => restock(url, { quantity, everySeconds: every, cartRefreshes }, listener).pipe(
+          Effect.scoped, Effect.provide(Layer.mergeAll(Browser.layerFor(selection), FetchHttpClient.layer)),
+        ),
+      )
+    }),
 ).pipe(
   Command.withDescription(
-    "Poll Eventim's availability API for <url> and, as soon as tickets are free, put up to --quantity of them in the cart in a ready Edge, then notify you and stop",
+    "Poll Eventim availability and reserve up to --quantity tickets in the selected browser; notify you to pay manually",
   ),
 )
 
 const profile = Command.make(
   "profile",
   { name: Argument.String("name").pipe(Argument.withDescription("Name of the account, used later as --profile <name>")) },
-  ({ name }) => setupProfile(name),
+  ({ name }) => Effect.flatMap(BrowserFlag, (browser) => setupProfile(name, Option.getOrUndefined(browser))),
 ).pipe(
   Command.withDescription(
-    "Open Edge on the saved profile <name>, empty the first time, for you to sign in; the profile is saved when you close the window",
+    "Open a reusable source profile to sign in; close the setup window to save it as your default",
   ),
 )
 
-const scraper = Command.make("ticket-scraper").pipe(
-  Command.withSubcommands([title, agent, watchCommand, restockCommand, seats, profile]),
-  Command.withGlobalFlags([ProfileFlag]),
+const tui = Command.make("tui", {}, () => dashboard).pipe(
+  Command.withDescription("Show all watch and restock listeners with live status and keyboard shortcuts"),
+)
+
+const scraper = Command.make("ticket-scraper", {}, () => dashboard).pipe(
+  Command.withSubcommands([title, agent, watchCommand, restockCommand, seats, profile, tui]),
+  Command.withGlobalFlags([ProfileFlag, BrowserFlag]),
 )
 
 // bun run sets npm_package_version from package.json; running the file directly does not.

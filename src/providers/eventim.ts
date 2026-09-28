@@ -1,4 +1,4 @@
-import { Effect, Fiber, Schema } from "effect"
+import { Data, Effect, Fiber, Schema } from "effect"
 import { HttpClient } from "effect/unstable/http"
 import { Page, type PageShape } from "../browser.ts"
 import { type Seat, type SeatProvider, SeatsError } from "../seats.ts"
@@ -350,6 +350,7 @@ const seatmapApi = <S extends Schema.Top>(kind: "mapping" | "availability", even
       Effect.flatMap((response) => Effect.map(response.text, (text) => ({ status: response.status, text }))),
       Effect.mapError((error) => new SeatsError({ message: `Eventim's ${kind} API did not answer: ${error.message}` })),
     )
+    if (status === 403) return yield* new AccessDenied({ url: seatmapUrl(kind, eventId), status })
     if (status === 200) {
       const value = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(schema))(text).pipe(
         Effect.mapError((error) => new SeatsError({ message: `Eventim's ${kind} API answered with an unexpected shape: ${error.message}` })),
@@ -365,24 +366,30 @@ const seatmapApi = <S extends Schema.Top>(kind: "mapping" | "availability", even
 export const readMapping = (eventId: string) => seatmapApi("mapping", eventId, MappingJson)
 export const readAvailability = (eventId: string) => seatmapApi("availability", eventId, AvailabilityJson)
 
-// For events without a seat map: the event page fetched from inside the open tab, which carries the browser's
-// bot-check cookies that plain HTTP lacks. Only a category that can be bought draws a cart button.
-export const pageOffersTickets = (page: PageShape, url: URL) =>
+// Akamai refuses a request it takes for a bot with a 403, and a page with its own "Access Denied" in place of the site's.
+export class AccessDenied extends Data.TaggedError("AccessDenied")<{ readonly url: string; readonly status: number }> {
+  get reason() {
+    return this.status === 403 ? "HTTP 403" : "Access Denied page"
+  }
+  override get message() {
+    return `blocked: ${this.reason} at ${this.url}`
+  }
+}
+
+const refuseIfDenied = (page: PageShape) =>
   Effect.gen(function* () {
-    const { status, text } = yield* page.use("fetch the event page", (raw) =>
-      raw.evaluate(async (href) => {
-        const response = await fetch(href, { credentials: "include", cache: "no-store" })
-        return { status: response.status, text: await response.text() }
-      }, inEnglish(url)),
+    const { status, denied } = yield* page.use("check for Access Denied", (raw) =>
+      raw.evaluate<{ status: number; denied: boolean }>(
+        `({ status: performance.getEntriesByType("navigation")[0]?.responseStatus ?? 0, denied: document.title.trim() === "Access Denied" || (document.querySelector("h1")?.textContent ?? "").trim() === "Access Denied" })`,
+      ),
     )
-    if (status !== 200 || text.includes("sec-if-cpt-container"))
-      return yield* new SeatsError({ message: `the event page answered HTTP ${status}${status === 200 ? " with a bot check" : ""}` })
-    return text.includes('data-qa="add-to-shopping-cart"')
+    if (status === 403 || denied) return yield* new AccessDenied({ url: yield* page.url, status })
   })
 
 export const openEventPage = (page: PageShape, url: URL) =>
   Effect.gen(function* () {
     yield* page.goto(inEnglish(url))
+    yield* refuseIfDenied(page)
     yield* declineConsent(page)
   })
 
@@ -394,6 +401,7 @@ const categoryForm = (index: number) => `[data-qa="price-category"] form >> nth=
 const confirmCart = (page: PageShape, refreshes: number) =>
   Effect.gen(function* () {
     for (let refresh = 0; ; refresh++) {
+      yield* refuseIfDenied(page)
       const shown = yield* page.use("wait for the tickets in the cart", (raw) =>
         raw.waitForFunction(`/Shopping Cart\\s+\\d+ tickets?,/.test(document.body.innerText)`, undefined, { timeout: 5_000 }).then(
           () => true,
@@ -415,6 +423,7 @@ export const addBestToCart = (url: URL, quantity: number, free: ReadonlyMap<stri
       // The consent banner was answered when the tab first opened, and waiting for one that never shows costs 3 seconds;
       // a banner that does show fails the attempt, and the retry below reopens the page through openEventPage.
       yield* page.goto(inEnglish(url))
+      yield* refuseIfDenied(page)
       const listed = yield* page.use("wait for the ticket categories", (raw) =>
         raw.locator('[data-qa="price-category"]').first().waitFor({ timeout: 20_000 }).then(
           () => true,
@@ -467,6 +476,8 @@ export const addBestToCart = (url: URL, quantity: number, free: ReadonlyMap<stri
           yield* Effect.logInfo(`Tickets are in the cart at ${result.success.url}`)
           return result.success
         }
+        // Another category would only meet the same refusal.
+        if (result.failure._tag === "AccessDenied") return yield* result.failure
         failures.push(`${category.name}: ${result.failure.message}`)
         yield* Effect.logWarning(`Could not add ${category.name} to the cart: ${result.failure.message}`)
         yield* openEventPage(page, url)

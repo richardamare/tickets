@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
-import { type Availability, describeChanges } from "./watch.ts"
+import { describeChanges } from "./watch.ts"
+import type { Availability } from "./watch-state.ts"
 
 const soldOut: Availability = {
   event: "Bjork",
@@ -37,3 +38,21 @@ test("price changes, new categories and removed categories are each reported", (
     "category Cat 2 no longer listed",
   ])
 })
+
+const runWatchProbe = async (mode: "concurrent" | "failure") => {
+  const { BunServices } = await import("@effect/platform-bun")
+  const { Effect, Path } = await import("effect")
+  const { ChildProcess } = await import("effect/unstable/process")
+  const code = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    const path = yield* Path.Path
+    const fixture = yield* path.fromFileUrl(new URL("./test-fixtures/watch-worker.ts", import.meta.url))
+    const child = yield* ChildProcess.make(process.execPath, [fixture], {
+      stdin: "ignore", stdout: "ignore", stderr: "inherit", env: { TICKET_TEST_WATCH_MODE: mode }, extendEnv: true,
+    })
+    return yield* child.exitCode
+  })).pipe(Effect.provide(BunServices.layer)))
+  expect(Number(code)).toBe(0)
+}
+
+test("a successful check with failed persistence is reported as a failed run", () => runWatchProbe("failure"))
+test("concurrent watch calls retain each event's last availability", () => runWatchProbe("concurrent"))
