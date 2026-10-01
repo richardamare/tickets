@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { BunServices } from "@effect/platform-bun"
 import { Effect, Path, Stream } from "effect"
-import { ChildProcess } from "effect/unstable/process"
+import { ChildProcess } from "effect/process"
 
 for (const mode of ["ready", "settings"] as const) {
   test(`setup records ${mode} persistence failure without publishing readiness or replacing defaults`, async () => {

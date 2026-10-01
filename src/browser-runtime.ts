@@ -1,5 +1,5 @@
 import { Effect, FileSystem, Path } from "effect"
-import { ChildProcess } from "effect/unstable/process"
+import { ChildProcess } from "effect/process"
 import { chromium } from "playwright"
 import { browserName, ensureBrowserInstalled, ProfileError, type BrowserKind } from "./browser-config.ts"
 

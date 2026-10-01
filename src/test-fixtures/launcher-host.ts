@@ -1,6 +1,6 @@
 import { BunRuntime, BunServices } from "@effect/platform-bun"
 import { Config, Effect, FileSystem, Path } from "effect"
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
+import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { makeListenerLauncher } from "../listener-launcher.ts"
 import { makeBrowserProfiles } from "../browser-config.ts"
 import { dashboard } from "../tui.ts"

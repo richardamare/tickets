@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { BunServices } from "@effect/platform-bun"
 import { Effect, Path } from "effect"
-import { ChildProcess } from "effect/unstable/process"
+import { ChildProcess } from "effect/process"
 
 for (const mode of ["watch", "restock"]) {
   test(`${mode} starts checks every 500ms including time spent checking`, async () => {

@@ -1,5 +1,5 @@
 import { Clock, Data, Effect, Fiber, Ref, Schema } from "effect"
-import { HttpClient } from "effect/unstable/http"
+import { HttpClient } from "effect/http"
 import { Page, type PageShape } from "../browser.ts"
 import { type Cart, type Seat, type SeatProvider, SeatsError } from "../seats.ts"
 

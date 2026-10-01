@@ -42,7 +42,7 @@ test("price changes, new categories and removed categories are each reported", (
 const runWatchProbe = async (mode: "concurrent" | "failure") => {
   const { BunServices } = await import("@effect/platform-bun")
   const { Effect, Path } = await import("effect")
-  const { ChildProcess } = await import("effect/unstable/process")
+  const { ChildProcess } = await import("effect/process")
   const code = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     const path = yield* Path.Path
     const fixture = yield* path.fromFileUrl(new URL("./test-fixtures/watch-worker.ts", import.meta.url))

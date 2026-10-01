@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { BunServices } from "@effect/platform-bun"
 import { ConfigProvider, Effect, FileSystem, Path, Schema, Stream } from "effect"
-import { ChildProcess } from "effect/unstable/process"
+import { ChildProcess } from "effect/process"
 import { Browser } from "./browser.ts"
 import { makeBrowserProfiles } from "./browser-config.ts"
 import { makeListenerRegistry } from "./listeners.ts"

@@ -1,5 +1,5 @@
 import { Cause, Config, Crypto, Data, Effect, FileSystem, Path, Schema } from "effect"
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
+import { ChildProcess, ChildProcessSpawner } from "effect/process"
 
 export const BrowserKind = Schema.Literals(["chrome", "edge"])
 export type BrowserKind = typeof BrowserKind.Type

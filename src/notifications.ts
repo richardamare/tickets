@@ -1,5 +1,5 @@
 import { Config, Effect, FileSystem, Path, Stream } from "effect"
-import { ChildProcess } from "effect/unstable/process"
+import { ChildProcess } from "effect/process"
 
 export const runCommand = (command: string, args: readonly string[]) => Effect.scoped(Effect.gen(function* () {
   const child = yield* ChildProcess.make(command, args, { stdin: "ignore", stdout: "ignore", stderr: "ignore" })

@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 import { BunRuntime, BunServices } from "@effect/platform-bun"
 import { Config, Console, Effect, Layer, Option, Schema } from "effect"
-import { Argument, Command, Flag } from "effect/unstable/cli"
-import { FetchHttpClient } from "effect/unstable/http"
+import { Argument, Command, Flag } from "effect/cli"
+import { FetchHttpClient } from "effect/http"
 import { runAgent } from "./agent.ts"
 import { Browser, BrowserFlag, Page, ProfileFlag, setupProfile } from "./browser.ts"
 import { makeBrowserProfiles } from "./browser-config.ts"

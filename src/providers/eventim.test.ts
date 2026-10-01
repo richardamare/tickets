@@ -99,7 +99,7 @@ test("the event id is the number at the end of the event page path", () => {
 
 test("the seat map API answering 403 is a block, not a plain failure", async () => {
   const { Effect, Layer } = await import("effect")
-  const { HttpClient, HttpClientResponse } = await import("effect/unstable/http")
+  const { HttpClient, HttpClientResponse } = await import("effect/http")
   const { readAvailability } = await import("./eventim.ts")
   const refusing = Layer.succeed(HttpClient.HttpClient, HttpClient.make((request) =>
     Effect.succeed(HttpClientResponse.fromWeb(request, new Response("<H1>Access Denied</H1>", { status: 403 }))),

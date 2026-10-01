@@ -1,5 +1,5 @@
 import { Clock, Crypto, Data, Effect, FileSystem, Path, Schema, Semaphore } from "effect"
-import { ChildProcess } from "effect/unstable/process"
+import { ChildProcess } from "effect/process"
 import { ListenerRequest, listenerArguments } from "./listener-request.ts"
 import { makeListenerRegistry } from "./listeners.ts"
 import { ensureBrowserInstalled, makeBrowserProfiles, type BrowserSelection } from "./browser-config.ts"

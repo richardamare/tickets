@@ -1,5 +1,5 @@
 import { Cause, Console, Context, Data, Effect, Layer, Option, type Scope } from "effect"
-import { Flag, GlobalFlag } from "effect/unstable/cli"
+import { Flag, GlobalFlag } from "effect/cli"
 import { browserName, makeBrowserProfiles, type BrowserKind, type BrowserSelection } from "./browser-config.ts"
 import { launchBrowser } from "./browser-runtime.ts"
 import { type Locator as PlaywrightLocator, type Page as PlaywrightPage } from "playwright"
