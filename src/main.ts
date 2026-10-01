@@ -129,6 +129,14 @@ const restockCommand = Command.make(
       Flag.withDescription("Category to try first: the cheapest, or the one with the most free tickets"),
       Flag.withDefault(defaults.prefer),
     ),
+    tabs: Flag.Int("tabs").pipe(
+      Flag.withDescription("Tabs that each try a different category at the same time on a hit"),
+      Flag.withDefault(3),
+      Flag.filter(
+        (count) => count >= 1 && count <= 8,
+        (count) => `--tabs ${count} is outside 1 to 8`,
+      ),
+    ),
     cartRefreshes: Flag.Int("cart-refreshes").pipe(
       Flag.withDescription("Times to refresh a cart that shows no tickets before trying the next category"),
       Flag.withDefault(2),
@@ -138,7 +146,7 @@ const restockCommand = Command.make(
       ),
     ),
   },
-  ({ url, quantity, every, prefer, cartRefreshes }) =>
+  ({ url, quantity, every, prefer, cartRefreshes, tabs }) =>
     Effect.gen(function* () {
       yield* Schema.decodeUnknownEffect(RestockUrl)(url)
       const selection = yield* selectedBrowser
@@ -146,7 +154,7 @@ const restockCommand = Command.make(
       const profileKey = profile === "default" ? "default" : `named:${profile}`
       return yield* withListeners(
         [{ kind: "restock", url, browser, profile, profileKey, everySeconds: every }],
-        ([listener]) => restock(url, { quantity, everySeconds: every, cartRefreshes, order: prefer }, listener).pipe(
+        ([listener]) => restock(url, { quantity, everySeconds: every, cartRefreshes, order: prefer, tabs }, listener).pipe(
           Effect.scoped, Effect.provide(Layer.mergeAll(Browser.layerFor(selection), FetchHttpClient.layer)),
         ),
       )

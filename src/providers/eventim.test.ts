@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { decodeSeatmap, eventIdOf, eventim, freeTickets } from "./eventim.ts"
+import { decodeSeatmap, eventIdOf, eventim, freeTickets, offersForTab } from "./eventim.ts"
 
 test("seat ids, positions, categories and availability are decoded from their deltas", () => {
   const seats = decodeSeatmap(
@@ -107,4 +107,10 @@ test("the seat map API answering 403 is a block, not a plain failure", async () 
   const result = await Effect.runPromise(readAvailability("22002879").pipe(Effect.flip, Effect.provide(refusing)))
   expect(result._tag).toBe("AccessDenied")
   expect(result.message).toContain("HTTP 403")
+})
+
+test("tabs take the sorted offers in turn, so the first offers are tried at the same time", () => {
+  const offers = ["Cat 3", "Cat 2", "Fosse", "Cat 1", "Carré Or"]
+  expect([0, 1, 2].map((tab) => offersForTab(offers, tab, 3))).toEqual([["Cat 3", "Cat 1"], ["Cat 2", "Carré Or"], ["Fosse"]])
+  expect(offersForTab(offers, 0, 1)).toEqual(offers)
 })

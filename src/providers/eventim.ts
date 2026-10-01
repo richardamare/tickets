@@ -1,4 +1,4 @@
-import { Data, Effect, Fiber, Schema } from "effect"
+import { Clock, Data, Effect, Fiber, Ref, Schema } from "effect"
 import { HttpClient } from "effect/unstable/http"
 import { Page, type PageShape } from "../browser.ts"
 import { type Cart, type Seat, type SeatProvider, SeatsError } from "../seats.ts"
@@ -405,10 +405,21 @@ export const pageOffersTickets = (page: PageShape, url: URL) =>
     return text.includes('data-qa="add-to-shopping-cart"') || text.includes('data-qa="AddToShoppingCart"')
   })
 
-export const openEventPage = (page: PageShape, url: URL) =>
+// When each tab last loaded the event page. A page loaded this recently still shows what can be bought, so a cart
+// attempt clicks it as it is instead of spending seconds on a reload.
+const loadedAt = new WeakMap<PageShape, number>()
+export const freshFor = 5 * 60_000
+
+const loadEventPage = (page: PageShape, url: URL) =>
   Effect.gen(function* () {
     yield* page.goto(inEnglish(url))
+    loadedAt.set(page, yield* Clock.currentTimeMillis)
     yield* refuseIfDenied(page)
+  })
+
+export const openEventPage = (page: PageShape, url: URL) =>
+  Effect.gen(function* () {
+    yield* loadEventPage(page, url)
     yield* declineConsent(page)
   })
 
@@ -430,7 +441,8 @@ export type CategoryOrder = (typeof CategoryOrder)[keyof typeof CategoryOrder]
 // The session cookie holds the cart, so a browser without Fnac's cookies starts a cart of its own.
 export const cartCookies = /(^|\.)fnacspectacles\.com$/
 
-export type Reserved = Cart & { readonly tickets: number }
+// tab is the index of the tab that reached the cart first, which shows it.
+export type Reserved = Cart & { readonly tickets: number; readonly tab?: number }
 
 const categoryForm = (index: number) => `[data-qa="price-category"] form >> nth=${index}`
 
@@ -526,76 +538,129 @@ const stepperEnabled = (page: PageShape, selector: string) =>
     raw.locator(selector).first().evaluate((button) => !button.hasAttribute("disabled") && !button.classList.contains("disabled")),
   )
 
-// Both ticket layouts sell the best seats left in a category, so no seat needs choosing.
-export const addBestToCart = (url: URL, quantity: number, free: ReadonlyMap<string, number>, cartRefreshes: number, order: CategoryOrder) =>
-  Page.use((page) =>
-    Effect.gen(function* () {
-      // The consent banner was answered when the tab first opened, and waiting for one that never shows costs 3 seconds;
-      // a banner that does show fails the attempt, and the retry below reopens the page through openEventPage.
-      yield* page.goto(inEnglish(url))
-      yield* refuseIfDenied(page)
-      const listed = yield* page.use("wait for the ticket categories", (raw) =>
-        raw.locator('[data-qa="price-category"], input.js-fast-booking-item').first().waitFor({ state: "attached", timeout: 20_000 }).then(
-          () => true,
-          () => false,
-        ),
-      )
-      if (!listed) return yield* new SeatsError({ message: "the event page lists no ticket category for sale" })
-      const offers = (yield* categoryListOffers(page))
-        .concat(yield* fastBookingOffers(page))
-        .filter((offer) => offer.max > 0)
-        .sort((a, b) => {
-          const byFree = (free.get(b.name) ?? 0) - (free.get(a.name) ?? 0)
-          const byPrice = a.price - b.price
-          return order === CategoryOrder.Cheapest ? byPrice || byFree : byFree || byPrice
-        })
-      if (offers.length === 0) return yield* new SeatsError({ message: "no ticket category on the page can be bought" })
+const sortOffers = (offers: ReadonlyArray<Offer>, free: ReadonlyMap<string, number>, order: CategoryOrder) =>
+  offers
+    .filter((offer) => offer.max > 0)
+    .toSorted((a, b) => {
+      const byFree = (free.get(b.name) ?? 0) - (free.get(a.name) ?? 0)
+      const byPrice = a.price - b.price
+      return order === CategoryOrder.Cheapest ? byPrice || byFree : byFree || byPrice
+    })
 
-      const failures: Array<string> = []
-      for (const offer of offers) {
-        const wanted = Math.max(1, Math.min(quantity, offer.max, free.get(offer.name) ?? quantity))
-        const attempt = Effect.gen(function* () {
-          yield* Effect.logInfo(`Choosing ${wanted} ticket(s) in ${offer.name}`)
-          if (offer.pick !== undefined) yield* click(page, offer.pick, "h1")
-          // The category list's stepper starts at 0 and fast booking's at 1.
-          const amount = Effect.map(page.locator(offer.amount).first().innerText, Number)
-          let chosen = yield* amount
-          while (chosen < wanted && (yield* stepperEnabled(page, offer.more))) {
-            yield* click(page, offer.more, "h1")
-            const next = yield* amount
-            if (next === chosen) break
-            chosen = next
-          }
-          if (!(chosen > 0)) return yield* new SeatsError({ message: `${offer.name}: the stepper stayed at ${chosen}` })
-          yield* Effect.logInfo(`Adding ${chosen} ticket(s) in ${offer.name} to the cart`)
-          // A selection the site takes ends on the cart; a refused one lands back on the event page or an error page.
-          const landed = yield* Effect.forkChild(
-            page.use("wait for the cart", (raw) => raw.waitForEvent("load", { timeout: 30_000 }).then(() => raw.url())),
-          )
-          yield* Effect.yieldNow
-          yield* click(page, offer.submit, "h1")
-          const target = new URL(yield* Fiber.join(landed))
-          if (target.pathname !== "/checkout.html") {
-            yield* refuseIfDenied(page)
-            return yield* new SeatsError({ message: `the site sent the selection to ${target.pathname}${target.search}` })
-          }
-          yield* confirmCart(page, cartRefreshes)
-          return { url: yield* page.url, contents: `${chosen}× ${offer.name}`, tickets: chosen } satisfies Reserved
-        })
-        const result = yield* Effect.result(attempt)
-        if (result._tag === "Success") {
-          yield* Effect.logInfo(`Tickets are in the cart at ${result.success.url}`)
-          return result.success
-        }
-        // Another category would only meet the same refusal.
-        if (result.failure._tag === "AccessDenied") return yield* result.failure
-        failures.push(`${offer.name}: ${result.failure.message}`)
-        yield* Effect.logWarning(`Could not add ${offer.name} to the cart: ${result.failure.message}`)
-        yield* openEventPage(page, url)
+const readOffers = (page: PageShape, free: ReadonlyMap<string, number>, order: CategoryOrder) =>
+  Effect.gen(function* () {
+    return sortOffers((yield* categoryListOffers(page)).concat(yield* fastBookingOffers(page)), free, order)
+  })
+
+// The consent banner was answered when the tab first opened, and waiting for one that never shows costs 3 seconds;
+// a banner that does show fails the attempt, and the retry reopens the page through openEventPage.
+const offersOnPage = (page: PageShape, url: URL, free: ReadonlyMap<string, number>, order: CategoryOrder) =>
+  Effect.gen(function* () {
+    const loaded = loadedAt.get(page)
+    if (loaded !== undefined && (yield* Clock.currentTimeMillis) - loaded < freshFor) {
+      const shown = yield* readOffers(page, free, order)
+      if (shown.length > 0) {
+        yield* Effect.logInfo(`Buying from the page loaded ${Math.round(((yield* Clock.currentTimeMillis) - loaded) / 1000)}s ago`)
+        return shown
       }
-      return yield* new SeatsError({ message: `no category went into the cart (${failures.join("; ")})` })
-    }),
-  )
+    }
+    yield* loadEventPage(page, url)
+    const listed = yield* page.use("wait for the ticket categories", (raw) =>
+      raw.locator('[data-qa="price-category"], input.js-fast-booking-item').first().waitFor({ state: "attached", timeout: 20_000 }).then(
+        () => true,
+        () => false,
+      ),
+    )
+    if (!listed) return yield* new SeatsError({ message: "the event page lists no ticket category for sale" })
+    return yield* readOffers(page, free, order)
+  })
+
+// Which of the sorted offers each tab tries first: the first tab the first offer, the second the second, and so on,
+// each tab moving on by the number of tabs.
+export const offersForTab = <A>(offers: ReadonlyArray<A>, tab: number, tabs: number) => offers.filter((_, index) => index % tabs === tab)
+
+const tryOffer = (page: PageShape, offer: Offer, wanted: number, cartRefreshes: number, stillWanted: Effect.Effect<boolean>) =>
+  Effect.gen(function* () {
+    yield* Effect.logInfo(`Choosing ${wanted} ticket(s) in ${offer.name}`)
+    if (offer.pick !== undefined) yield* click(page, offer.pick, "h1")
+    // The category list's stepper starts at 0 and fast booking's at 1.
+    const amount = Effect.map(page.locator(offer.amount).first().innerText, Number)
+    let chosen = yield* amount
+    while (chosen < wanted && (yield* stepperEnabled(page, offer.more))) {
+      yield* click(page, offer.more, "h1")
+      const next = yield* amount
+      if (next === chosen) break
+      chosen = next
+    }
+    if (!(chosen > 0)) return yield* new SeatsError({ message: `${offer.name}: the stepper stayed at ${chosen}` })
+    if (!(yield* stillWanted)) return undefined
+    yield* Effect.logInfo(`Adding ${chosen} ticket(s) in ${offer.name} to the cart`)
+    // A selection the site takes ends on the cart; a refused one lands back on the event page or an error page.
+    const landed = yield* Effect.forkChild(
+      page.use("wait for the cart", (raw) => raw.waitForEvent("load", { timeout: 30_000 }).then(() => raw.url())),
+    )
+    yield* Effect.yieldNow
+    yield* click(page, offer.submit, "h1")
+    const target = new URL(yield* Fiber.join(landed))
+    if (target.pathname !== "/checkout.html") {
+      yield* refuseIfDenied(page)
+      return yield* new SeatsError({ message: `the site sent the selection to ${target.pathname}${target.search}` })
+    }
+    yield* confirmCart(page, cartRefreshes)
+    return { url: yield* page.url, contents: `${chosen}× ${offer.name}`, tickets: chosen }
+  })
+
+// Both ticket layouts sell the best seats left in a category, so no seat needs choosing. Every tab tries a different
+// category at the same time with the mouse; the tabs share the browser's cookies and so one cart, and a tab stops
+// before submitting once the others have filled the quantity, so tickets only exceed it when submits overlap.
+export const addBestToCart = (
+  tabs: ReadonlyArray<PageShape>,
+  url: URL,
+  quantity: number,
+  free: ReadonlyMap<string, number>,
+  cartRefreshes: number,
+  order: CategoryOrder,
+) =>
+  Effect.gen(function* () {
+    const reserved = yield* Ref.make(0)
+    const stillWanted = Effect.map(Ref.get(reserved), (count) => count < quantity)
+    const failures: Array<string> = []
+    const inTab = (page: PageShape, tab: number) =>
+      Effect.gen(function* () {
+        const mine = offersForTab(yield* offersOnPage(page, url, free, order), tab, tabs.length)
+        const carts: Array<{ readonly url: string; readonly contents: string; readonly tickets: number }> = []
+        for (const [index, offer] of mine.entries()) {
+          if (!(yield* stillWanted)) break
+          if (index > 0) yield* openEventPage(page, url)
+          const wanted = Math.max(1, Math.min(quantity - (yield* Ref.get(reserved)), offer.max, free.get(offer.name) ?? quantity))
+          const result = yield* Effect.result(tryOffer(page, offer, wanted, cartRefreshes, stillWanted))
+          if (result._tag === "Success") {
+            if (result.success === undefined) break
+            yield* Ref.update(reserved, (count) => count + result.success!.tickets)
+            yield* Effect.logInfo(`Tickets are in the cart at ${result.success.url} (tab ${tab + 1})`)
+            carts.push(result.success)
+            break
+          }
+          // Another category would only meet the same refusal.
+          if (result.failure._tag === "AccessDenied") return yield* result.failure
+          failures.push(`${offer.name}: ${result.failure.message}`)
+          yield* Effect.logWarning(`Could not add ${offer.name} to the cart (tab ${tab + 1}): ${result.failure.message}`)
+        }
+        return carts
+      })
+    const results = yield* Effect.forEach(tabs, (page, tab) => Effect.result(inTab(page, tab)), { concurrency: "unbounded" })
+    const filled = results.flatMap((result, tab) => (result._tag === "Success" ? result.success.map((cart) => ({ ...cart, tab })) : []))
+    if (filled.length > 0)
+      return {
+        url: filled[0]!.url,
+        contents: filled.map((cart) => cart.contents).join(" + "),
+        tickets: filled.reduce((total, cart) => total + cart.tickets, 0),
+        tab: filled[0]!.tab,
+      } satisfies Reserved
+    for (const result of results) if (result._tag === "Failure" && result.failure._tag === "AccessDenied") return yield* result.failure
+    for (const result of results) if (result._tag === "Failure") failures.push(result.failure.message)
+    return yield* new SeatsError({ message: `no category went into the cart (${failures.join("; ")})` })
+  })
 
 // Only shops verified against this page layout; other Eventim storefronts share the API but not necessarily the page.
 const hosts = ["fnacspectacles.com"]

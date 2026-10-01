@@ -18,13 +18,13 @@ mock.module("../notifications.ts", () => ({
   notifyUntilClicked: () => Effect.succeed(false), runCommand: () => Effect.void,
 }))
 mock.module("../providers/eventim.ts", () => ({
-  eventIdOf: () => "123", eventim: { matches: () => true }, cartCookies: /fnac/,
+  eventIdOf: () => "123", eventim: { matches: () => true }, cartCookies: /fnac/, freshFor: 300_000,
   openEventPage: () => Effect.void, pageOffersTickets: () => Effect.succeed(false),
   readMapping: () => Effect.succeed({ _tag: "Ok", value: {} }),
   readAvailability: () => Effect.succeed({ _tag: "Ok", value: {} }),
   freeTickets: () => new Map([["Catégorie 1", 40]]),
   // The site takes at most 5 tickets per cart.
-  addBestToCart: (_url: URL, quantity: number, _free: unknown, _refreshes: number, order: string) => Effect.sync(() => {
+  addBestToCart: (_tabs: unknown, _url: URL, quantity: number, _free: unknown, _refreshes: number, order: string) => Effect.sync(() => {
     asked.push(quantity)
     orders.push(order)
     const tickets = Math.min(5, quantity)
@@ -32,7 +32,7 @@ mock.module("../providers/eventim.ts", () => ({
   }),
 }))
 const { restock } = await import("../restock.ts")
-await Effect.runPromise(restock("https://fnacspectacles.com/event/show-123/", { everySeconds: 0.5, quantity: 12, cartRefreshes: 0, order: "cheapest" }).pipe(
+await Effect.runPromise(restock("https://fnacspectacles.com/event/show-123/", { everySeconds: 0.5, quantity: 12, cartRefreshes: 0, order: "cheapest", tabs: 1 }).pipe(
   Effect.provideService(Browser, { ...makeBrowser(100), openAnother: Effect.sync(() => makeBrowser(101 + opened++)) } as never),
   Effect.scoped, Effect.timeout("5 seconds"), Effect.provide(BunServices.layer),
 ) as Effect.Effect<void, unknown>)

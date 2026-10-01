@@ -18,7 +18,7 @@ mock.module("../providers/eventim.ts", () => ({
   openEventPage: () => Effect.void, pageOffersTickets: () => Effect.succeed(false),
   readMapping: () => Effect.succeed({ _tag: "Ok", value: { priceCategories: [] } }),
   readAvailability: () => observe.pipe(Effect.as({ _tag: "Ok", value: {} })),
-  freeTickets: () => new Map(), cartCookies: /x/,
+  freeTickets: () => new Map(), cartCookies: /x/, freshFor: 300_000,
   addBestToCart: () => Effect.die("No tickets should be reserved"),
 }))
 const { watch } = await import("../watch.ts")
@@ -29,7 +29,7 @@ await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
   const dir = yield* fs.makeTempDirectoryScoped({ prefix: "polling-cadence-" })
   const run: Effect.Effect<void, unknown, unknown> = process.argv[2] === "watch"
     ? watch(["https://fnacspectacles.com/event/show-123/"], { everySeconds: 0.5, once: false, until: [] })
-    : restock("https://fnacspectacles.com/event/show-123/", { everySeconds: 0.5, quantity: 1, cartRefreshes: 0, order: "cheapest" })
+    : restock("https://fnacspectacles.com/event/show-123/", { everySeconds: 0.5, quantity: 1, cartRefreshes: 0, order: "cheapest", tabs: 1 })
   yield* run.pipe(
     Effect.provideService(ConfigProvider.ConfigProvider, ConfigProvider.fromUnknown({ HOME: dir, WATCH_STATE_FILE: path.join(dir, "watch.json") })),
     Effect.provideService(Browser, { newPage: Effect.succeed({}), name: "Chrome" }),

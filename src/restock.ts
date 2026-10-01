@@ -1,6 +1,6 @@
-import { Clock, Console, Effect } from "effect"
-import { Browser, type BrowserShape, type PageShape, Page } from "./browser.ts"
-import { type AccessDenied, addBestToCart, cartCookies, type CategoryOrder, eventIdOf, eventim, freeTickets, openEventPage, pageOffersTickets, readAvailability, readMapping, type Reserved } from "./providers/eventim.ts"
+import { Clock, Console, Effect, Schedule, Semaphore } from "effect"
+import { Browser, type BrowserShape, type PageShape } from "./browser.ts"
+import { type AccessDenied, addBestToCart, cartCookies, type CategoryOrder, eventIdOf, eventim, freeTickets, freshFor, openEventPage, pageOffersTickets, readAvailability, readMapping, type Reserved } from "./providers/eventim.ts"
 import { type Cart, SeatsError } from "./seats.ts"
 import { findExecutable, notify, notifyUntilClicked, runCommand } from "./notifications.ts"
 import type { Listener } from "./listeners.ts"
@@ -36,11 +36,18 @@ const announceCart = (cart: Cart, page: PageShape, pid: number, group: string) =
     yield* runCommand("afplay", ["/System/Library/Sounds/Glass.aiff"]).pipe(Effect.ignore)
   })
 
-type Window = { readonly browser: BrowserShape; readonly page: PageShape }
+// tabs[0] is the one the event page check reads; every tab tries its own category on a hit.
+type Window = { readonly browser: BrowserShape; readonly tabs: ReadonlyArray<PageShape> }
 
 export const restock = (
   url: string,
-  options: { readonly quantity: number; readonly everySeconds: number; readonly cartRefreshes: number; readonly order: CategoryOrder },
+  options: {
+    readonly quantity: number
+    readonly everySeconds: number
+    readonly cartRefreshes: number
+    readonly order: CategoryOrder
+    readonly tabs: number
+  },
   listener?: Listener,
 ) =>
   Effect.gen(function* () {
@@ -54,11 +61,11 @@ export const restock = (
     let denied: AccessDenied | undefined
     // A blocked page is reloaded on the first hit anyway, so the API keeps being polled meanwhile.
     const ready = (next: BrowserShape) => Effect.gen(function* () {
-      const page = yield* next.newPage
-      windows.push({ browser: next, page })
+      const tabs = yield* Effect.replicateEffect(next.newPage, options.tabs)
+      windows.push({ browser: next, tabs })
       if (listener) yield* listener.update({ message: `Opening ${next.name} on the event page`, browserPids: windows.map((window) => window.browser.pid) })
-      yield* Effect.logInfo("Opening the event page so the browser is ready to buy")
-      const opened = yield* Effect.result(openEventPage(page, event))
+      yield* Effect.logInfo(`Opening the event page in ${tabs.length} tab(s) so the browser is ready to buy`)
+      const opened = yield* Effect.result(Effect.forEach(tabs, (tab) => openEventPage(tab, event), { concurrency: "unbounded", discard: true }))
       if (opened._tag === "Failure" && opened.failure._tag !== "AccessDenied") return yield* opened.failure
       denied = opened._tag === "Failure" && opened.failure._tag === "AccessDenied" ? opened.failure : undefined
       if (denied !== undefined) {
@@ -71,7 +78,7 @@ export const restock = (
     let mapping = yield* readMapping(eventId).pipe(Effect.orElseSucceed(() => ({ _tag: "NoSeatmap" }) as const))
     // Seat map events are checked over the API alone; an event sold without a seat map shows its tickets only on its page.
     const pageCheck = Effect.gen(function* () {
-      const onSale = yield* pageOffersTickets(windows.at(-1)!.page, event)
+      const onSale = yield* pageOffersTickets(windows.at(-1)!.tabs[0]!, event)
       return (onSale ? { _tag: "Free", free: new Map() } : { _tag: "None", source: "event page" }) as Check
     })
     const check = Effect.gen(function* () {
@@ -82,6 +89,19 @@ export const restock = (
       const free = freeTickets(mapping.value, availability.value)
       return (free.size > 0 ? { _tag: "Free", free } : { _tag: "None", source: "seat map API" }) as Check
     })
+
+    // A cart attempt clicks a recently loaded page as it is, so while the API watches the event the idle tabs are
+    // reloaded one at a time before they go stale. An event without a seat map changes its page when tickets come
+    // back, so its tabs are reloaded on the hit instead.
+    const busy = yield* Semaphore.make(1)
+    let refreshed = 0
+    const refreshOne = Effect.gen(function* () {
+      if (mapping._tag !== "Ok") return
+      const tabs = windows.at(-1)!.tabs
+      const tab = tabs[refreshed++ % tabs.length]!
+      yield* busy.withPermits(1)(openEventPage(tab, event)).pipe(Effect.ignore({ log: "Warn" }))
+    })
+    yield* refreshOne.pipe(Effect.repeat(Schedule.spaced(`${Math.floor(freshFor * 0.8 / options.tabs)} millis`)), Effect.delay(`${Math.floor(freshFor * 0.8 / options.tabs)} millis`), Effect.forkScoped)
 
     const stamp = Effect.map(Clock.currentTimeMillis, (now) => new Date(now).toISOString())
     yield* Console.log(`[${yield* stamp}] Watching ${event.href} every ${options.everySeconds}s for up to ${options.quantity} ticket(s)`)
@@ -115,7 +135,7 @@ export const restock = (
         if (result.success._tag === "Free") {
           if (listener) yield* listener.update({ status: "carting", message: "Tickets available; adding to cart" })
           const window = windows.at(-1)!
-          const bought = yield* Effect.result(addBestToCart(event, options.quantity - held(), result.success.free, options.cartRefreshes, options.order).pipe(Effect.provideService(Page, window.page)))
+          const bought = yield* Effect.result(busy.withPermits(1)(addBestToCart(window.tabs, event, options.quantity - held(), result.success.free, options.cartRefreshes, options.order)))
           if (bought._tag === "Success") {
             denied = undefined
             carts.push({ reserved: bought.success, window })
@@ -123,7 +143,7 @@ export const restock = (
             yield* Console.log(`[${yield* stamp}] IN THE CART ${carts.length}: ${bought.success.contents} at ${bought.success.url} (${held()} of ${options.quantity})`)
             if (listener) yield* listener.update({ status: "in_cart", message: `${progress()}pay in ${window.browser.name} before the hold expires` })
             // Each cart's hold runs out on its own, so each is announced the moment it fills.
-            yield* announceCart(bought.success, window.page, window.browser.pid, `ticket-scraper-restock-${eventId}-${carts.length}`).pipe(Effect.ignore({ log: "Warn" }), Effect.forkScoped)
+            yield* announceCart(bought.success, window.tabs[bought.success.tab ?? 0]!, window.browser.pid, `ticket-scraper-restock-${eventId}-${carts.length}`).pipe(Effect.ignore({ log: "Warn" }), Effect.forkScoped)
             if (full) break
             // The site caps how many tickets one cart takes, and a browser that shares the first one's cookies shares
             // its cart, so the rest go into another browser that starts without them.
