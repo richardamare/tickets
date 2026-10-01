@@ -15,7 +15,7 @@ class Browser extends Context.Service<Browser, { newPage: Effect.Effect<{}>; nam
 mock.module("../browser.ts", () => ({ Page, Browser }))
 mock.module("../providers/eventim.ts", () => ({
   eventIdOf: () => "123", eventim: { matches: () => true },
-  openEventPage: () => Effect.void,
+  openEventPage: () => Effect.void, pageOffersTickets: () => Effect.succeed(false),
   readMapping: () => Effect.succeed({ _tag: "Ok", value: { priceCategories: [] } }),
   readAvailability: () => observe.pipe(Effect.as({ _tag: "Ok", value: {} })),
   freeTickets: () => new Map(), cartCookies: /x/,

@@ -1,6 +1,6 @@
 import { Clock, Console, Effect } from "effect"
 import { Browser, type BrowserShape, type PageShape, Page } from "./browser.ts"
-import { type AccessDenied, addBestToCart, cartCookies, type CategoryOrder, eventIdOf, eventim, freeTickets, openEventPage, readAvailability, readMapping, type Reserved } from "./providers/eventim.ts"
+import { type AccessDenied, addBestToCart, cartCookies, type CategoryOrder, eventIdOf, eventim, freeTickets, openEventPage, pageOffersTickets, readAvailability, readMapping, type Reserved } from "./providers/eventim.ts"
 import { type Cart, SeatsError } from "./seats.ts"
 import { findExecutable, notify, notifyUntilClicked, runCommand } from "./notifications.ts"
 import type { Listener } from "./listeners.ts"
@@ -10,7 +10,11 @@ type Check =
   | { readonly _tag: "None"; readonly source: string }
 
 const describe = (check: Check) =>
-  check._tag === "None" ? `nothing free (${check.source})` : `free: ${[...check.free].map(([name, count]) => `${name} ×${count}`).join(", ")}`
+  check._tag === "None"
+    ? `nothing free (${check.source})`
+    : check.free.size === 0
+      ? "tickets on sale (event page)"
+      : `free: ${[...check.free].map(([name, count]) => `${name} ×${count}`).join(", ")}`
 
 const reveal = (page: PageShape, pid: number) =>
   page.use("bring browser to the front", (raw) => raw.bringToFront()).pipe(
@@ -65,11 +69,16 @@ export const restock = (
     yield* ready(browser)
 
     let mapping = yield* readMapping(eventId).pipe(Effect.orElseSucceed(() => ({ _tag: "NoSeatmap" }) as const))
+    // Seat map events are checked over the API alone; an event sold without a seat map shows its tickets only on its page.
+    const pageCheck = Effect.gen(function* () {
+      const onSale = yield* pageOffersTickets(windows.at(-1)!.page, event)
+      return (onSale ? { _tag: "Free", free: new Map() } : { _tag: "None", source: "event page" }) as Check
+    })
     const check = Effect.gen(function* () {
       if (mapping._tag === "NoSeatmap") mapping = yield* readMapping(eventId)
-      if (mapping._tag === "NoSeatmap") return { _tag: "None", source: "no seat map" } as Check
+      if (mapping._tag === "NoSeatmap") return yield* pageCheck
       const availability = yield* readAvailability(eventId)
-      if (availability._tag === "NoSeatmap") return { _tag: "None", source: "no seat map" } as Check
+      if (availability._tag === "NoSeatmap") return yield* pageCheck
       const free = freeTickets(mapping.value, availability.value)
       return (free.size > 0 ? { _tag: "Free", free } : { _tag: "None", source: "seat map API" }) as Check
     })
@@ -89,7 +98,7 @@ export const restock = (
       if (result._tag === "Failure") {
         failures++
         if (listener) yield* listener.update(result.failure._tag === "AccessDenied"
-          ? { status: "blocked", message: `${result.failure.reason} from the API · check ${failures} failed`, lastCheckAt: yield* Clock.currentTimeMillis }
+          ? { status: "blocked", message: `${result.failure.reason} ${result.failure.url.includes("public-api.eventim.com") ? "from the API" : "on the event page"} · check ${failures} failed`, lastCheckAt: yield* Clock.currentTimeMillis }
           : { status: "retrying", message: `Check failed (${failures}): ${result.failure.message}`, lastCheckAt: yield* Clock.currentTimeMillis })
         yield* Console.error(`[${yield* stamp}] check failed (${failures} in a row): ${result.failure.message}`)
         if (failures === 3) yield* notify("Restock check failing", `${event.href}: ${result.failure.message}`)

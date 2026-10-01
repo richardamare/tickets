@@ -387,6 +387,24 @@ const refuseIfDenied = (page: PageShape) =>
     if (status === 403 || denied) return yield* new AccessDenied({ url: yield* page.url, status })
   })
 
+// For an event without a seat map, the only sign of tickets is the event page, fetched from inside the open tab so
+// it carries the bot-check cookies that plain HTTP lacks. Only a category that can be bought draws a cart button,
+// in either of the page's two ticket layouts.
+export const pageOffersTickets = (page: PageShape, url: URL) =>
+  Effect.gen(function* () {
+    const href = inEnglish(url)
+    const { status, text } = yield* page.use("fetch the event page", (raw) =>
+      raw.evaluate(async (target) => {
+        const response = await fetch(target, { credentials: "include", cache: "no-store" })
+        return { status: response.status, text: await response.text() }
+      }, href),
+    )
+    if (status === 403 || /<title>\s*Access Denied\s*<\/title>/.test(text)) return yield* new AccessDenied({ url: href, status })
+    if (status !== 200 || text.includes("sec-if-cpt-container"))
+      return yield* new SeatsError({ message: `the event page answered HTTP ${status}${status === 200 ? " with a bot check" : ""}` })
+    return text.includes('data-qa="add-to-shopping-cart"') || text.includes('data-qa="AddToShoppingCart"')
+  })
+
 export const openEventPage = (page: PageShape, url: URL) =>
   Effect.gen(function* () {
     yield* page.goto(inEnglish(url))
@@ -394,7 +412,16 @@ export const openEventPage = (page: PageShape, url: URL) =>
     yield* declineConsent(page)
   })
 
-type Category = { readonly index: number; readonly name: string; readonly typeIndex: number; readonly max: number; readonly price: number }
+// One way to buy tickets of a category: an optional click that selects it, its quantity stepper and its cart button.
+type Offer = {
+  readonly name: string
+  readonly max: number
+  readonly price: number
+  readonly pick: string | undefined
+  readonly more: string
+  readonly amount: string
+  readonly submit: string
+}
 
 // Which category a cart attempt tries first; the rest follow as fallbacks.
 export const CategoryOrder = { Cheapest: "cheapest", MostFree: "most-free" } as const
@@ -426,7 +453,80 @@ const confirmCart = (page: PageShape, refreshes: number) =>
     }
   })
 
-// The ticket list beside the seat map sells the best seats left in a category, so no seat needs choosing.
+// The category list gives each category its own stepper and cart button.
+const categoryListOffers = (page: PageShape) =>
+  page.use("read the ticket categories", (raw) =>
+    raw.locator('[data-qa="price-category"] form').evaluateAll((forms) =>
+      forms.map((form, index) => {
+        const types = Array.from(form.querySelectorAll(".js-ticket-type-item"), (type) => type as typeof form)
+        const buyable = (type: typeof form) => type.querySelector('[data-qa="more-tickets"]:not([disabled]):not(.disabled)') !== null
+        // A marketing label marks a reduced rate, such as for members, that needs proof at the door.
+        let typeIndex = types.findIndex((type) => !type.getAttribute("data-marketing-label-id") && buyable(type))
+        if (typeIndex === -1) typeIndex = types.findIndex(buyable)
+        const max = Number(types[typeIndex]?.querySelector(".js-stepper")?.getAttribute("data-max") ?? 0)
+        // "€ 84.53" in English; a price that cannot be read sorts last.
+        const shown = types[typeIndex]?.querySelector('[data-qa="tickettypeItem-price"]')?.textContent?.replace(/[^\d.,]/g, "").replace(",", ".") ?? ""
+        const price = shown === "" ? Number.POSITIVE_INFINITY : Number(shown)
+        return { index, name: (form.getAttribute("data-qa") ?? "").replace(/^pc-list-number-/, ""), typeIndex, max, price: Number.isNaN(price) ? Number.POSITIVE_INFINITY : price }
+      }),
+    ),
+  ).pipe(
+    Effect.map((categories) =>
+      categories
+        .filter((category) => category.typeIndex !== -1)
+        .map((category): Offer => {
+          const type = `${categoryForm(category.index)} >> .js-ticket-type-item >> nth=${category.typeIndex}`
+          return {
+            name: category.name,
+            max: category.max,
+            price: category.price,
+            pick: undefined,
+            more: `${type} >> [data-qa="more-tickets"]`,
+            amount: `${type} >> .js-stepper-amount-text`,
+            submit: `${categoryForm(category.index)} >> [data-qa="add-to-shopping-cart"]`,
+          }
+        }),
+    ),
+  )
+
+// Fast booking lists every category and rate as a radio button and shares one stepper and cart button among them.
+const fastBookingOffers = (page: PageShape) =>
+  page.use("read the fast booking categories", (raw) =>
+    raw.locator("input.js-fast-booking-item:not([disabled])").evaluateAll((radios) =>
+      radios.map((radio) => ({
+        id: radio.id,
+        name: radio.getAttribute("data-pc-title") ?? "?",
+        rate: radio.getAttribute("data-discount-level-name") ?? "",
+        max: Number(radio.getAttribute("data-max") ?? 0),
+        // In thousandths of a euro: 399000 is € 399.00.
+        price: Number(radio.getAttribute("data-unit-value") ?? Number.NaN) / 1000,
+      })),
+    ),
+  ).pipe(
+    Effect.map((radios) =>
+      radios
+        // A rate other than Normal is usually a reduced one that needs proof at the door.
+        .filter((radio, _, all) => radio.rate === "Normal" || !all.some((other) => other.name === radio.name && other.rate === "Normal"))
+        .map(
+          (radio): Offer => ({
+            name: radio.name,
+            max: radio.max,
+            price: Number.isNaN(radio.price) ? Number.POSITIVE_INFINITY : radio.price,
+            pick: `label[for="${radio.id}"]`,
+            more: '[data-qa="MoreTickets"]',
+            amount: '[data-qa="TicketAmount"]',
+            submit: '[data-qa="AddToShoppingCart"]',
+          }),
+        ),
+    ),
+  )
+
+const stepperEnabled = (page: PageShape, selector: string) =>
+  page.use("check the stepper", (raw) =>
+    raw.locator(selector).first().evaluate((button) => !button.hasAttribute("disabled") && !button.classList.contains("disabled")),
+  )
+
+// Both ticket layouts sell the best seats left in a category, so no seat needs choosing.
 export const addBestToCart = (url: URL, quantity: number, free: ReadonlyMap<string, number>, cartRefreshes: number, order: CategoryOrder) =>
   Page.use((page) =>
     Effect.gen(function* () {
@@ -435,58 +535,52 @@ export const addBestToCart = (url: URL, quantity: number, free: ReadonlyMap<stri
       yield* page.goto(inEnglish(url))
       yield* refuseIfDenied(page)
       const listed = yield* page.use("wait for the ticket categories", (raw) =>
-        raw.locator('[data-qa="price-category"]').first().waitFor({ timeout: 20_000 }).then(
+        raw.locator('[data-qa="price-category"], input.js-fast-booking-item').first().waitFor({ state: "attached", timeout: 20_000 }).then(
           () => true,
           () => false,
         ),
       )
       if (!listed) return yield* new SeatsError({ message: "the event page lists no ticket category for sale" })
-      const categories = yield* page.use("read the ticket categories", (raw) =>
-        raw.locator('[data-qa="price-category"] form').evaluateAll((forms): Array<Category> =>
-          forms.map((form, index) => {
-            const types = Array.from(form.querySelectorAll(".js-ticket-type-item"), (type) => type as typeof form)
-            const buyable = (type: typeof form) => type.querySelector('[data-qa="more-tickets"]:not([disabled]):not(.disabled)') !== null
-            // A marketing label marks a reduced rate, such as for members, that needs proof at the door.
-            let typeIndex = types.findIndex((type) => !type.getAttribute("data-marketing-label-id") && buyable(type))
-            if (typeIndex === -1) typeIndex = types.findIndex(buyable)
-            const max = Number(types[typeIndex]?.querySelector(".js-stepper")?.getAttribute("data-max") ?? 0)
-            // "€ 84.53" in English; a price that cannot be read sorts last.
-            const shown = types[typeIndex]?.querySelector('[data-qa="tickettypeItem-price"]')?.textContent?.replace(/[^\d.,]/g, "").replace(",", ".") ?? ""
-            const price = shown === "" ? Number.POSITIVE_INFINITY : Number(shown)
-            return { index, name: (form.getAttribute("data-qa") ?? "").replace(/^pc-list-number-/, ""), typeIndex, max, price: Number.isNaN(price) ? Number.POSITIVE_INFINITY : price }
-          }),
-        ),
-      )
-      const candidates = categories
-        .filter((category) => category.typeIndex !== -1 && category.max > 0)
+      const offers = (yield* categoryListOffers(page))
+        .concat(yield* fastBookingOffers(page))
+        .filter((offer) => offer.max > 0)
         .sort((a, b) => {
           const byFree = (free.get(b.name) ?? 0) - (free.get(a.name) ?? 0)
           const byPrice = a.price - b.price
           return order === CategoryOrder.Cheapest ? byPrice || byFree : byFree || byPrice
         })
-      if (candidates.length === 0) return yield* new SeatsError({ message: "no ticket category on the page can be bought" })
+      if (offers.length === 0) return yield* new SeatsError({ message: "no ticket category on the page can be bought" })
 
       const failures: Array<string> = []
-      for (const category of candidates) {
-        const known = free.get(category.name)
-        const wanted = Math.max(1, Math.min(quantity, category.max, known ?? quantity))
-        const type = `${categoryForm(category.index)} >> .js-ticket-type-item >> nth=${category.typeIndex}`
+      for (const offer of offers) {
+        const wanted = Math.max(1, Math.min(quantity, offer.max, free.get(offer.name) ?? quantity))
         const attempt = Effect.gen(function* () {
-          yield* Effect.logInfo(`Choosing ${wanted} ticket(s) in ${category.name}`)
-          for (let count = 0; count < wanted; count++) yield* click(page, `${type} >> [data-qa="more-tickets"]`, "h1")
-          const chosen = Number(yield* page.locator(`${type} >> .js-stepper-amount-text`).first().innerText)
-          if (!(chosen > 0)) return yield* new SeatsError({ message: `${category.name}: the stepper stayed at ${chosen}` })
-          yield* Effect.logInfo(`Adding ${chosen} ticket(s) in ${category.name} to the cart`)
-          // The form posts to the cart; a refused selection lands back on the event page instead.
+          yield* Effect.logInfo(`Choosing ${wanted} ticket(s) in ${offer.name}`)
+          if (offer.pick !== undefined) yield* click(page, offer.pick, "h1")
+          // The category list's stepper starts at 0 and fast booking's at 1.
+          const amount = Effect.map(page.locator(offer.amount).first().innerText, Number)
+          let chosen = yield* amount
+          while (chosen < wanted && (yield* stepperEnabled(page, offer.more))) {
+            yield* click(page, offer.more, "h1")
+            const next = yield* amount
+            if (next === chosen) break
+            chosen = next
+          }
+          if (!(chosen > 0)) return yield* new SeatsError({ message: `${offer.name}: the stepper stayed at ${chosen}` })
+          yield* Effect.logInfo(`Adding ${chosen} ticket(s) in ${offer.name} to the cart`)
+          // A selection the site takes ends on the cart; a refused one lands back on the event page or an error page.
           const landed = yield* Effect.forkChild(
             page.use("wait for the cart", (raw) => raw.waitForEvent("load", { timeout: 30_000 }).then(() => raw.url())),
           )
           yield* Effect.yieldNow
-          yield* click(page, `${categoryForm(category.index)} >> [data-qa="add-to-shopping-cart"]`, "h1")
-          if (new URL(yield* Fiber.join(landed)).pathname.includes("/event/"))
-            return yield* new SeatsError({ message: "the site sent the selection back to the event page" })
+          yield* click(page, offer.submit, "h1")
+          const target = new URL(yield* Fiber.join(landed))
+          if (target.pathname !== "/checkout.html") {
+            yield* refuseIfDenied(page)
+            return yield* new SeatsError({ message: `the site sent the selection to ${target.pathname}${target.search}` })
+          }
           yield* confirmCart(page, cartRefreshes)
-          return { url: yield* page.url, contents: `${chosen}× ${category.name}`, tickets: chosen } satisfies Reserved
+          return { url: yield* page.url, contents: `${chosen}× ${offer.name}`, tickets: chosen } satisfies Reserved
         })
         const result = yield* Effect.result(attempt)
         if (result._tag === "Success") {
@@ -495,8 +589,8 @@ export const addBestToCart = (url: URL, quantity: number, free: ReadonlyMap<stri
         }
         // Another category would only meet the same refusal.
         if (result.failure._tag === "AccessDenied") return yield* result.failure
-        failures.push(`${category.name}: ${result.failure.message}`)
-        yield* Effect.logWarning(`Could not add ${category.name} to the cart: ${result.failure.message}`)
+        failures.push(`${offer.name}: ${result.failure.message}`)
+        yield* Effect.logWarning(`Could not add ${offer.name} to the cart: ${result.failure.message}`)
         yield* openEventPage(page, url)
       }
       return yield* new SeatsError({ message: `no category went into the cart (${failures.join("; ")})` })

@@ -19,7 +19,7 @@ mock.module("../notifications.ts", () => ({
 }))
 mock.module("../providers/eventim.ts", () => ({
   eventIdOf: () => "123", eventim: { matches: () => true }, cartCookies: /fnac/,
-  openEventPage: () => Effect.void,
+  openEventPage: () => Effect.void, pageOffersTickets: () => Effect.succeed(false),
   readMapping: () => Effect.succeed({ _tag: "Ok", value: {} }),
   readAvailability: () => Effect.succeed({ _tag: "Ok", value: {} }),
   freeTickets: () => new Map([["Catégorie 1", 40]]),
