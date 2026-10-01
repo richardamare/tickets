@@ -152,7 +152,7 @@ test("refresh errors remain visible beneath persistent notices", () => {
 })
 
 test("the minimum supported terminal preserves every current question", () => {
-  for (const step of ["url", "quantity", "every", "until", "profile", "review"] as const) {
+  for (const step of ["url", "quantity", "prefer", "tabs", "refreshes", "every", "until", "profile", "review"] as const) {
     const form = { ...startForm("restock"), step }
     const screen = plain(renderDashboard([], { ...initialView, form }, { columns: 46, rows: 13, now: 0 }))
     expect(screen.split("\r\n")).toHaveLength(12)

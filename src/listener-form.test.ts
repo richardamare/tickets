@@ -37,6 +37,8 @@ test("both modes accept half-second checks and reject shorter intervals and non-
   let restock = answer(startForm("restock"), "https://fnacspectacles.com/event/show-123/").form
   restock = answer(restock, "2").form
   restock = answer(restock, "").form
+  restock = answer(restock, "").form
+  restock = answer(restock, "").form
   expect(formQuestion(restock).defaultValue).toBe("0.5")
   expect(submitForm(restock, "0.4").error).toContain("0.5")
   expect(answer(restock, "0.5").form.every).toBe(0.5)
@@ -72,8 +74,27 @@ test("restock asks which tickets to try first, defaults to the cheapest and pass
   expect(answer(form, "").form.prefer).toBe("cheapest")
   form = answer(form, "2").form
   expect(form.prefer).toBe("most-free")
-  form = answer(answer(form, "").form, "").form
+  form = answer(answer(answer(answer(form, "").form, "").form, "").form, "").form
   const { request } = submitForm(form, "")
   expect(request && listenerArguments(request)).toContain("most-free")
   expect(request && listenerArguments(request)).toContain("50")
+})
+
+test("restock asks for tabs and cart refreshes, validates them and passes them on as flags", () => {
+  let form = answer(startForm("restock"), "https://fnacspectacles.com/event/show-123/").form
+  form = answer(answer(form, "2").form, "").form
+  expect(form.step).toBe("tabs")
+  expect(formQuestion(form).defaultValue).toBe("3")
+  for (const wrong of ["0", "9", "2.5", "many"]) expect(submitForm(form, wrong).error).toContain("1 to 8")
+  form = answer(form, "5").form
+  expect(form.step).toBe("refreshes")
+  expect(formQuestion(form).defaultValue).toBe("2")
+  for (const wrong of ["-1", "11", "1.5"]) expect(submitForm(form, wrong).error).toContain("0 to 10")
+  form = answer(form, "0").form
+  expect(form.step).toBe("every")
+  form = answer(answer(form, "").form, "").form
+  const { request } = submitForm(form, "")
+  expect(request && listenerArguments(request)).toEqual([
+    "restock", "https://fnacspectacles.com/event/show-123/", "--every", "0.5", "--quantity", "2", "--prefer", "cheapest", "--tabs", "5", "--cart-refreshes", "0",
+  ])
 })

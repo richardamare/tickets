@@ -6,7 +6,7 @@ import { FetchHttpClient } from "effect/http"
 import { runAgent } from "./agent.ts"
 import { Browser, BrowserFlag, Page, ProfileFlag, setupProfile } from "./browser.ts"
 import { makeBrowserProfiles } from "./browser-config.ts"
-import { CheckInterval, TicketQuantity, RestockUrl, defaults } from "./listener-request.ts"
+import { CartRefreshes, CheckInterval, TabCount, TicketQuantity, RestockUrl, defaults } from "./listener-request.ts"
 import { Foundry } from "./foundry.ts"
 import { eventim } from "./providers/eventim.ts"
 import { restock } from "./restock.ts"
@@ -131,19 +131,13 @@ const restockCommand = Command.make(
     ),
     tabs: Flag.Int("tabs").pipe(
       Flag.withDescription("Tabs that each try a different category at the same time on a hit"),
-      Flag.withDefault(3),
-      Flag.filter(
-        (count) => count >= 1 && count <= 8,
-        (count) => `--tabs ${count} is outside 1 to 8`,
-      ),
+      Flag.withDefault(defaults.tabs),
+      Flag.filter(Schema.is(TabCount), (count) => `--tabs ${count} is outside 1 to 8`),
     ),
     cartRefreshes: Flag.Int("cart-refreshes").pipe(
       Flag.withDescription("Times to refresh a cart that shows no tickets before trying the next category"),
-      Flag.withDefault(2),
-      Flag.filter(
-        (count) => count >= 0,
-        (count) => `--cart-refreshes ${count} is below 0`,
-      ),
+      Flag.withDefault(defaults.cartRefreshes),
+      Flag.filter(Schema.is(CartRefreshes), (count) => `--cart-refreshes ${count} is outside 0 to 10`),
     ),
   },
   ({ url, quantity, every, prefer, cartRefreshes, tabs }) =>
